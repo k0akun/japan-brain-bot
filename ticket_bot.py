@@ -6,7 +6,7 @@ from datetime import datetime
 import os
 
 # ===== 設定 =====
-TOKEN = os.environ.get("TOKEN")"
+TOKEN = os.environ.get("TOKEN")
 GUILD_ID = 1408888613961339022          
 TICKET_CATEGORY_ID = 1431152459023122533
 LOG_CHANNEL_ID = 1408890176926908519
