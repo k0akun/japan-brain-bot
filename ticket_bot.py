@@ -249,15 +249,21 @@ def contains_blocked_link(text: str) -> bool:
     return False
 
 async def punish(message: discord.Message, reason: str, notify: str):
-    try:
-        await message.delete()
-    except discord.errors.Forbidden:
-        pass
+    # タイムアウトを先に実行
     timeout_until = discord.utils.utcnow() + timedelta(minutes=TIMEOUT_MINUTES)
     try:
         await message.author.timeout(timeout_until, reason=reason)
-    except discord.errors.Forbidden:
+    except (discord.errors.Forbidden, discord.errors.HTTPException):
         pass
+
+    # そのユーザーの直近メッセージを一括削除（レートリミット対策）
+    try:
+        def is_target(m):
+            return m.author.id == message.author.id
+        await message.channel.purge(limit=10, check=is_target, bulk=True)
+    except (discord.errors.Forbidden, discord.errors.HTTPException):
+        pass
+
     try:
         await message.channel.send(
             f"{message.author.mention} {notify} {TIMEOUT_MINUTES}分間タイムアウトします。",
