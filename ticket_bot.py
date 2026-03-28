@@ -24,6 +24,7 @@ content_spam_cache = []
 CONTENT_SPAM_USERS = 2     # 何人が似た内容を送ったらタイムアウト
 CONTENT_SPAM_SECONDS = 30  # 何秒以内にカウント
 CONTENT_SPAM_RATIO = 0.80  # 類似度しきい値（80%以上で一致とみなす）
+MAX_NEWLINES = 10          # これ以上の改行で削除＋タイムアウト
 
 # ===== データベース初期化 =====
 def init_db():
@@ -290,6 +291,11 @@ async def on_message(message: discord.Message):
     content_stripped = message.content.replace(" ", "").replace("\n", "").replace("\u3000", "")
     if len(content_stripped) > MAX_MESSAGE_LENGTH or len(message.content) > MAX_MESSAGE_LENGTH:
         await punish(message, "長文スパム検知", "長文スパムを検知しました。")
+        return
+
+    # 改行スパムチェック
+    if message.content.count("\n") >= MAX_NEWLINES:
+        await punish(message, "改行スパム検知", "改行スパムを検知しました。")
         return
 
     # 連続同一メッセージチェック
