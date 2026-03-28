@@ -6,6 +6,9 @@ from datetime import datetime, timezone
 import os
 import json
 from collections import defaultdict
+from difflib import SequenceMatcher
+import re
+import time
 
 # ===== 設定 =====
 TOKEN = os.environ.get("TOKEN")
@@ -16,6 +19,15 @@ SPAM_INTERVAL = 5
 RAID_ACCOUNT_AGE_DAYS = 7
 RAID_JOIN_LIMIT = 5
 RAID_JOIN_INTERVAL = 10
+# 追加AutoMod設定
+MAX_MESSAGE_LENGTH = 140   # 長文検知: 文字数上限
+MAX_NEWLINES = 10          # 改行スパム: 改行数上限
+TIMEOUT_MINUTES = 5        # 自動タイムアウト時間（分）
+SPAM_COUNT = 3             # 連続同一メッセージ: 何回でタイムアウト
+CONTENT_SPAM_USERS = 4    # 複数アカウントスパム: 何人でタイムアウト
+CONTENT_SPAM_SECONDS = 10  # 複数アカウントスパム: 何秒以内
+CONTENT_SPAM_RATIO = 0.80  # 複数アカウントスパム: 類似度しきい値
+CONTENT_SPAM_PREFIX = 8    # 複数アカウントスパム: 前半一致文字数
 # ================
 
 # ===== サーバー設定をJSONで管理 =====
@@ -77,6 +89,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # スパム検知用メモリ
 spam_tracker = defaultdict(list)
+# 追加AutoMod用キャッシュ
+same_msg_cache = defaultdict(lambda: {"content": "", "count": 0})
+content_spam_cache = []  # [(user_id, text, timestamp)]
 
 # レイド検知用メモリ
 join_tracker = []
@@ -84,6 +99,45 @@ join_tracker = []
 # 警告数メモリ
 warn_tracker = defaultdict(int)
 
+
+# ===========================
+# ===== 追加AutoMod ヘルパー =====
+# ===========================
+
+def is_similar(a: str, b: str) -> bool:
+    if SequenceMatcher(None, a, b).ratio() >= CONTENT_SPAM_RATIO:
+        return True
+    if len(a) >= CONTENT_SPAM_PREFIX and len(b) >= CONTENT_SPAM_PREFIX:
+        if a[:CONTENT_SPAM_PREFIX] == b[:CONTENT_SPAM_PREFIX]:
+            return True
+    return False
+
+async def punish_automod(member: discord.Member, guild: discord.Guild, channel: discord.TextChannel, reason: str, detail: str):
+    """タイムアウト＋DM通知＋ログ"""
+    from datetime import timedelta
+    timeout_until = discord.utils.utcnow() + timedelta(minutes=TIMEOUT_MINUTES)
+    try:
+        await member.timeout(timeout_until, reason=reason)
+    except (discord.errors.Forbidden, discord.errors.HTTPException):
+        pass
+    # DM通知
+    try:
+        await member.send(
+            f"⚠️ **{guild.name}** で自動タイムアウトされました。\n"
+            f"理由: {detail}\n"
+            f"タイムアウト時間: {TIMEOUT_MINUTES}分"
+        )
+    except (discord.errors.Forbidden, discord.errors.HTTPException):
+        pass
+    # チャンネル通知
+    try:
+        await channel.send(
+            f"{member.mention} {detail} {TIMEOUT_MINUTES}分間タイムアウトします。",
+            delete_after=10
+        )
+    except (discord.errors.Forbidden, discord.errors.HTTPException):
+        pass
+    await log_action(guild, f"🔨 自動タイムアウト {TIMEOUT_MINUTES}分", member, detail)
 
 # ===========================
 # ===== AutoMod =====
@@ -100,8 +154,81 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
+    text = message.content.strip()
+
+    # 添付ファイルのみはスキップ
+    if text:
+        # 長文チェック
+        stripped = text.replace(" ", "").replace("\n", "").replace("\u3000", "")
+        if len(stripped) > MAX_MESSAGE_LENGTH or len(text) > MAX_MESSAGE_LENGTH:
+            try:
+                await message.channel.purge(limit=10, check=lambda m: m.author.id == message.author.id, bulk=True)
+            except Exception:
+                pass
+            await punish_automod(message.author, message.guild, message.channel, "長文スパム検知", "長文スパムを検知しました。")
+            return
+
+        # 改行スパムチェック
+        if text.count("\n") >= MAX_NEWLINES:
+            try:
+                await message.channel.purge(limit=10, check=lambda m: m.author.id == message.author.id, bulk=True)
+            except Exception:
+                pass
+            await punish_automod(message.author, message.guild, message.channel, "改行スパム検知", "改行スパムを検知しました。")
+            return
+
+        # 連続同一メッセージチェック（6文字以上のみ）
+        if len(text) >= 6:
+            cache = same_msg_cache[message.author.id]
+            if text == cache["content"]:
+                cache["count"] += 1
+            else:
+                cache["content"] = text
+                cache["count"] = 1
+            if cache["count"] >= SPAM_COUNT:
+                same_msg_cache[message.author.id] = {"content": "", "count": 0}
+                try:
+                    await message.channel.purge(limit=10, check=lambda m: m.author.id == message.author.id, bulk=True)
+                except Exception:
+                    pass
+                await punish_automod(message.author, message.guild, message.channel, "連続スパム検知", "同じメッセージを連続で送信しています。")
+                return
+        else:
+            same_msg_cache[message.author.id] = {"content": "", "count": 0}
+
+        # 複数アカウントスパム検知
+        now = time.time()
+        content_spam_cache[:] = [(uid, t, ts) for uid, t, ts in content_spam_cache if now - ts < CONTENT_SPAM_SECONDS]
+        similar = [(uid, t, ts) for uid, t, ts in content_spam_cache if uid != message.author.id and is_similar(text, t)]
+        content_spam_cache.append((message.author.id, text, now))
+        if len(similar) + 1 >= CONTENT_SPAM_USERS:
+            guilty_ids = {uid for uid, _, _ in similar} | {message.author.id}
+            content_spam_cache[:] = [(uid, t, ts) for uid, t, ts in content_spam_cache if uid not in guilty_ids]
+            for uid in guilty_ids:
+                m = message.guild.get_member(uid)
+                if m and not m.guild_permissions.administrator:
+                    from datetime import timedelta
+                    try:
+                        await m.timeout(discord.utils.utcnow() + timedelta(minutes=TIMEOUT_MINUTES), reason="複数アカウントスパム検知")
+                    except Exception:
+                        pass
+                    try:
+                        await m.send(
+                            f"⚠️ **{message.guild.name}** で自動タイムアウトされました。\n"
+                            f"理由: 複数アカウントによるスパムを検知しました。\n"
+                            f"タイムアウト時間: {TIMEOUT_MINUTES}分"
+                        )
+                    except Exception:
+                        pass
+            try:
+                await message.channel.purge(limit=10, check=lambda m: m.author.id == message.author.id, bulk=True)
+            except Exception:
+                pass
+            await message.channel.send("🚨 複数アカウントによるスパムを検知しました。関係者を全員タイムアウトしました。", delete_after=10)
+            await log_action(message.guild, "🚨 複数アカウントスパム検知", message.author, f"対象ID: {guilty_ids}")
+            return
+
     # URLフィルター
-    import re
     url_pattern = re.compile(r'https?://([^\s/]+)')
     urls = url_pattern.findall(message.content)
     for domain in urls:
