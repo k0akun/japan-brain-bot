@@ -24,6 +24,7 @@ content_spam_cache = []
 CONTENT_SPAM_USERS = 4     # 何人が似た内容を送ったらタイムアウト
 CONTENT_SPAM_SECONDS = 10  # 何秒以内にカウント
 CONTENT_SPAM_RATIO = 0.80  # 類似度しきい値（80%以上で一致とみなす）
+CONTENT_SPAM_PREFIX = 8    # 前半この文字数以上一致したら同じ文とみなす
 MAX_NEWLINES = 10          # これ以上の改行で削除＋タイムアウト
 
 # ===== データベース初期化 =====
@@ -296,6 +297,16 @@ def contains_blocked_link(text: str) -> bool:
             return True
     return False
 
+def is_similar(a: str, b: str) -> bool:
+    """類似度80%以上 OR 前半8文字以上一致で同じ文とみなす"""
+    if SequenceMatcher(None, a, b).ratio() >= CONTENT_SPAM_RATIO:
+        return True
+    prefix_len = CONTENT_SPAM_PREFIX
+    if len(a) >= prefix_len and len(b) >= prefix_len:
+        if a[:prefix_len] == b[:prefix_len]:
+            return True
+    return False
+
 async def punish(message: discord.Message, reason: str, notify: str):
     # タイムアウトを先に実行
     timeout_until = discord.utils.utcnow() + timedelta(minutes=TIMEOUT_MINUTES)
@@ -350,28 +361,35 @@ async def on_message(message: discord.Message):
     if message.author.guild_permissions.administrator:
         return
 
-    # 長文チェック
-    content_stripped = message.content.replace(" ", "").replace("\n", "").replace("\u3000", "")
-    if len(content_stripped) > MAX_MESSAGE_LENGTH or len(message.content) > MAX_MESSAGE_LENGTH:
-        await punish(message, "長文スパム検知", "長文スパムを検知しました。")
-        return
+    # 添付ファイルのみ（テキストなし）はスキップ
+    text = message.content.strip()
 
-    # 改行スパムチェック
-    if message.content.count("\n") >= MAX_NEWLINES:
-        await punish(message, "改行スパム検知", "改行スパムを検知しました。")
-        return
+    if text:
+        # 長文チェック
+        content_stripped = text.replace(" ", "").replace("\n", "").replace("\u3000", "")
+        if len(content_stripped) > MAX_MESSAGE_LENGTH or len(text) > MAX_MESSAGE_LENGTH:
+            await punish(message, "長文スパム検知", "長文スパムを検知しました。")
+            return
 
-    # 連続同一メッセージチェック
-    cache = spam_cache[message.author.id]
-    if message.content == cache["content"]:
-        cache["count"] += 1
-    else:
-        cache["content"] = message.content
-        cache["count"] = 1
-    if cache["count"] >= SPAM_COUNT:
-        spam_cache[message.author.id] = {"content": "", "count": 0}
-        await punish(message, "連続スパム検知", "同じメッセージを連続で送信しています。")
-        return
+        # 改行スパムチェック
+        if text.count("\n") >= MAX_NEWLINES:
+            await punish(message, "改行スパム検知", "改行スパムを検知しました。")
+            return
+
+        # 連続同一メッセージチェック（6文字以上のみ対象）
+        if len(text) >= 6:
+            cache = spam_cache[message.author.id]
+            if text == cache["content"]:
+                cache["count"] += 1
+            else:
+                cache["content"] = text
+                cache["count"] = 1
+            if cache["count"] >= SPAM_COUNT:
+                spam_cache[message.author.id] = {"content": "", "count": 0}
+                await punish(message, "連続スパム検知", "同じメッセージを連続で送信しています。")
+                return
+        else:
+            spam_cache[message.author.id] = {"content": "", "count": 0}
 
     # リンクチェック（YouTube以外をブロック）
     if contains_blocked_link(message.content):
