@@ -129,14 +129,7 @@ async def punish_automod(member: discord.Member, guild: discord.Guild, channel: 
         )
     except (discord.errors.Forbidden, discord.errors.HTTPException):
         pass
-    # チャンネル通知
-    try:
-        await channel.send(
-            f"{member.mention} {detail} {TIMEOUT_MINUTES}分間タイムアウトします。",
-            delete_after=10
-        )
-    except (discord.errors.Forbidden, discord.errors.HTTPException):
-        pass
+
     await log_action(guild, f"🔨 自動タイムアウト {TIMEOUT_MINUTES}分", member, detail)
 
 # ===========================
@@ -224,7 +217,6 @@ async def on_message(message: discord.Message):
                 await message.channel.purge(limit=10, check=lambda m: m.author.id == message.author.id, bulk=True)
             except Exception:
                 pass
-            await message.channel.send("🚨 複数アカウントによるスパムを検知しました。関係者を全員タイムアウトしました。", delete_after=10)
             await log_action(message.guild, "🚨 複数アカウントスパム検知", message.author, f"対象ID: {guilty_ids}")
             return
 
