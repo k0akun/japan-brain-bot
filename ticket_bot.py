@@ -274,12 +274,6 @@ async def auto_punish(member: discord.Member, guild: discord.Guild, count: int):
     if count == 3:
         await member.timeout(discord.utils.utcnow() + __import__("datetime").timedelta(minutes=10), reason="警告3回（AutoMod）")
         await log_action(guild, "⏱️ タイムアウト10分", member, "警告3回に達したため")
-    elif count == 5:
-        await member.kick(reason="警告5回（AutoMod）")
-        await log_action(guild, "👢 キック", member, "警告5回に達したため")
-    elif count >= 7:
-        await member.ban(reason="警告7回（AutoMod）")
-        await log_action(guild, "🔨 BAN", member, "警告7回に達したため")
 
 
 # ===========================
@@ -666,5 +660,7 @@ async def on_ready():
         print(f"❌ 同期エラー: {e}")
     print(f"✅ {bot.user} としてログインしました")
 
+
+bot.run(TOKEN)
 
 bot.run(TOKEN)
