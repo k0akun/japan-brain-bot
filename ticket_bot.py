@@ -315,10 +315,8 @@ async def punish(message: discord.Message, reason: str, notify: str):
     # 本人のみに通知（ephemeral風にDM送信）
     try:
         await message.author.send(
-            f"⚠️ **{message.guild.name}** で自動タイムアウトされました。
-"
-            f"理由: {notify}
-"
+            f"⚠️ **{message.guild.name}** で自動タイムアウトされました。\n"
+            f"理由: {notify}\n"
             f"タイムアウト時間: {TIMEOUT_MINUTES}分"
         )
     except (discord.errors.Forbidden, discord.errors.HTTPException):
