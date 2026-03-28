@@ -35,9 +35,15 @@ def init_db():
             guild_id INTEGER PRIMARY KEY,
             ticket_category_id INTEGER,
             log_channel_id INTEGER,
-            staff_role_id INTEGER
+            staff_role_id INTEGER,
+            mod_log_channel_id INTEGER
         )
     """)
+    # 既存テーブルにカラムがなければ追加
+    try:
+        c.execute("ALTER TABLE server_config ADD COLUMN mod_log_channel_id INTEGER")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -48,6 +54,25 @@ def get_config(guild_id: int):
     row = c.fetchone()
     conn.close()
     return row  # (ticket_category_id, log_channel_id, staff_role_id) or None
+
+def get_mod_log(guild_id: int):
+    conn = sqlite3.connect("servers.db")
+    c = conn.cursor()
+    c.execute("SELECT mod_log_channel_id FROM server_config WHERE guild_id = ?", (guild_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def set_mod_log(guild_id: int, channel_id: int):
+    conn = sqlite3.connect("servers.db")
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO server_config (guild_id, mod_log_channel_id) VALUES (?, ?)"
+        " ON CONFLICT(guild_id) DO UPDATE SET mod_log_channel_id = excluded.mod_log_channel_id",
+        (guild_id, channel_id)
+    )
+    conn.commit()
+    conn.close()
 
 def set_config(guild_id: int, ticket_category_id: int, log_channel_id: int, staff_role_id: int):
     conn = sqlite3.connect("servers.db")
@@ -222,6 +247,21 @@ async def setup(
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+# ===== スラッシュコマンド: モデレーターログ設定 =====
+@bot.tree.command(name="set-mod-log", description="荒らし対策のログチャンネルを設定します（管理者のみ）")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(channel="ログを送信するチャンネル")
+async def set_mod_log_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
+    set_mod_log(interaction.guild.id, channel.id)
+    embed = discord.Embed(
+        title="✅ モデレーターログ設定完了",
+        description=f"荒らし対策のログチャンネルを {channel.mention} に設定しました。",
+        color=discord.Color.green(),
+        timestamp=datetime.now()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 # ===== スラッシュコマンド: パネル送信 =====
 @bot.tree.command(name="ticket-panel", description="チケットパネルを送信します（管理者のみ）")
 @app_commands.checks.has_permissions(administrator=True)
@@ -272,13 +312,38 @@ async def punish(message: discord.Message, reason: str, notify: str):
     except (discord.errors.Forbidden, discord.errors.HTTPException):
         pass
 
+    # 本人のみに通知（ephemeral風にDM送信）
     try:
-        await message.channel.send(
-            f"{message.author.mention} {notify} {TIMEOUT_MINUTES}分間タイムアウトします。",
-            delete_after=10
+        await message.author.send(
+            f"⚠️ **{message.guild.name}** で自動タイムアウトされました。
+"
+            f"理由: {notify}
+"
+            f"タイムアウト時間: {TIMEOUT_MINUTES}分"
         )
-    except discord.errors.Forbidden:
+    except (discord.errors.Forbidden, discord.errors.HTTPException):
         pass
+
+    # モデレーターログに記録
+    mod_log_id = get_mod_log(message.guild.id)
+    if mod_log_id:
+        log_channel = message.guild.get_channel(mod_log_id)
+        if log_channel:
+            embed = discord.Embed(
+                title="🔨 自動タイムアウト",
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="ユーザー", value=f"{message.author.mention} ({message.author.id})", inline=False)
+            embed.add_field(name="理由", value=notify, inline=False)
+            embed.add_field(name="チャンネル", value=message.channel.mention, inline=False)
+            embed.add_field(name="内容", value=message.content[:300] or "（空）", inline=False)
+            embed.add_field(name="タイムアウト時間", value=f"{TIMEOUT_MINUTES}分", inline=False)
+            embed.set_thumbnail(url=message.author.display_avatar.url)
+            try:
+                await log_channel.send(embed=embed)
+            except (discord.errors.Forbidden, discord.errors.HTTPException):
+                pass
 
 @bot.event
 async def on_message(message: discord.Message):
