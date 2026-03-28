@@ -36,6 +36,12 @@ def save_bad_words(words):
 
 BAD_WORDS = load_bad_words()
 
+# ===== 許可するURLドメイン =====
+ALLOWED_DOMAINS = [
+    "youtube.com",
+    "youtu.be",
+]
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
@@ -61,6 +67,27 @@ warn_tracker = defaultdict(int)
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
+
+    # スタッフは全てスキップ
+    staff_role = message.guild.get_role(STAFF_ROLE_ID)
+    if staff_role in message.author.roles or message.author.guild_permissions.administrator:
+        await bot.process_commands(message)
+        return
+
+    # URLフィルター
+    import re
+    url_pattern = re.compile(r'https?://([^\s/]+)')
+    urls = url_pattern.findall(message.content)
+    for domain in urls:
+        domain = domain.lower().replace("www.", "")
+        if not any(domain == a or domain.endswith("." + a) for a in ALLOWED_DOMAINS):
+            await message.delete()
+            await message.channel.send(
+                f"🔗 {message.author.mention} このリンクは許可されていません。",
+                delete_after=5
+            )
+            await log_action(message.guild, "🔗 不正URLブロック", message.author, f"URL: `{domain}`")
+            return
 
     # 悪言フィルター
     for word in BAD_WORDS:
@@ -240,6 +267,47 @@ async def log_action(guild: discord.Guild, action: str, user, detail: str = ""):
 # ===========================
 # ===== 禁止ワード管理コマンド =====
 # ===========================
+
+@bot.tree.command(name="url-add", description="許可するURLドメインを追加します（スタッフのみ）")
+@app_commands.describe(domain="追加するドメイン（例: twitter.com）")
+@app_commands.checks.has_role(STAFF_ROLE_ID)
+async def url_add(interaction: discord.Interaction, domain: str):
+    domain = domain.lower().replace("www.", "").strip()
+    if domain in ALLOWED_DOMAINS:
+        await interaction.response.send_message(f"⚠️ `{domain}` はすでに許可されています。", ephemeral=True)
+        return
+    ALLOWED_DOMAINS.append(domain)
+    await interaction.response.send_message(f"✅ `{domain}` を許可リストに追加しました。", ephemeral=True)
+    await log_action(interaction.guild, "🔗 許可URL追加", interaction.user, f"ドメイン: `{domain}`")
+
+
+@bot.tree.command(name="url-remove", description="許可するURLドメインを削除します（スタッフのみ）")
+@app_commands.describe(domain="削除するドメイン（例: twitter.com）")
+@app_commands.checks.has_role(STAFF_ROLE_ID)
+async def url_remove(interaction: discord.Interaction, domain: str):
+    domain = domain.lower().replace("www.", "").strip()
+    if domain not in ALLOWED_DOMAINS:
+        await interaction.response.send_message(f"❌ `{domain}` は登録されていません。", ephemeral=True)
+        return
+    ALLOWED_DOMAINS.remove(domain)
+    await interaction.response.send_message(f"✅ `{domain}` を許可リストから削除しました。", ephemeral=True)
+    await log_action(interaction.guild, "🗑️ 許可URL削除", interaction.user, f"ドメイン: `{domain}`")
+
+
+@bot.tree.command(name="url-list", description="許可されているURLドメイン一覧を表示します（スタッフのみ）")
+@app_commands.checks.has_role(STAFF_ROLE_ID)
+async def url_list(interaction: discord.Interaction):
+    if not ALLOWED_DOMAINS:
+        await interaction.response.send_message("📋 許可されているドメインはありません。", ephemeral=True)
+        return
+    domain_list = "\n".join([f"・{d}" for d in ALLOWED_DOMAINS])
+    embed = discord.Embed(
+        title="🔗 許可URLドメイン一覧",
+        description=domain_list,
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 @bot.tree.command(name="badword-add", description="禁止ワードを追加します（スタッフのみ）")
 @app_commands.describe(word="追加する禁止ワード")
