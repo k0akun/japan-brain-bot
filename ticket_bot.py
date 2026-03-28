@@ -4,14 +4,49 @@ from discord import app_commands
 import asyncio
 from datetime import datetime
 import os
+import sqlite3
 
 # ===== 設定 =====
 TOKEN = os.environ.get("TOKEN")
-GUILD_ID = 1408888613961339022          
-TICKET_CATEGORY_ID = 1431152459023122533
-LOG_CHANNEL_ID = 1408890176926908519
-STAFF_ROLE_ID = 1426318103469621398
 # ================
+
+# ===== データベース初期化 =====
+def init_db():
+    conn = sqlite3.connect("servers.db")
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS server_config (
+            guild_id INTEGER PRIMARY KEY,
+            ticket_category_id INTEGER,
+            log_channel_id INTEGER,
+            staff_role_id INTEGER
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def get_config(guild_id: int):
+    conn = sqlite3.connect("servers.db")
+    c = conn.cursor()
+    c.execute("SELECT ticket_category_id, log_channel_id, staff_role_id FROM server_config WHERE guild_id = ?", (guild_id,))
+    row = c.fetchone()
+    conn.close()
+    return row  # (ticket_category_id, log_channel_id, staff_role_id) or None
+
+def set_config(guild_id: int, ticket_category_id: int, log_channel_id: int, staff_role_id: int):
+    conn = sqlite3.connect("servers.db")
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO server_config (guild_id, ticket_category_id, log_channel_id, staff_role_id)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            ticket_category_id = excluded.ticket_category_id,
+            log_channel_id = excluded.log_channel_id,
+            staff_role_id = excluded.staff_role_id
+    """, (guild_id, ticket_category_id, log_channel_id, staff_role_id))
+    conn.commit()
+    conn.close()
+
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -20,32 +55,20 @@ intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# ===== チケットパネルのビュー（ボタン一覧） =====
+# ===== チケットパネルのビュー =====
 class TicketPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="📋 モデレーター応募",
-        style=discord.ButtonStyle.primary,
-        custom_id="ticket_mod"
-    )
+    @discord.ui.button(label="📋 モデレーター応募", style=discord.ButtonStyle.primary, custom_id="ticket_mod")
     async def ticket_mod(self, interaction: discord.Interaction, button: discord.ui.Button):
         await create_ticket(interaction, "mod-application", "モデレーター応募")
 
-    @discord.ui.button(
-        label="❓ サポート・質問",
-        style=discord.ButtonStyle.success,
-        custom_id="ticket_support"
-    )
+    @discord.ui.button(label="❓ サポート・質問", style=discord.ButtonStyle.success, custom_id="ticket_support")
     async def ticket_support(self, interaction: discord.Interaction, button: discord.ui.Button):
         await create_ticket(interaction, "support", "サポート・質問")
 
-    @discord.ui.button(
-        label="📩 その他・お問い合わせ",
-        style=discord.ButtonStyle.secondary,
-        custom_id="ticket_other"
-    )
+    @discord.ui.button(label="📩 その他・お問い合わせ", style=discord.ButtonStyle.secondary, custom_id="ticket_other")
     async def ticket_other(self, interaction: discord.Interaction, button: discord.ui.Button):
         await create_ticket(interaction, "inquiry", "その他・お問い合わせ")
 
@@ -55,23 +78,24 @@ class TicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="🔒 チケットを閉じる",
-        style=discord.ButtonStyle.danger,
-        custom_id="close_ticket"
-    )
+    @discord.ui.button(label="🔒 チケットを閉じる", style=discord.ButtonStyle.danger, custom_id="close_ticket")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel = interaction.channel
+        config = get_config(interaction.guild.id)
 
-        # スタッフロール確認
-        staff_role = interaction.guild.get_role(STAFF_ROLE_ID)
+        if not config:
+            await interaction.response.send_message("❌ このサーバーはまだ設定されていません。`/setup` を実行してください。", ephemeral=True)
+            return
+
+        _, log_channel_id, staff_role_id = config
+        staff_role = interaction.guild.get_role(staff_role_id)
+
         if staff_role not in interaction.user.roles and not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ スタッフのみチケットを閉じられます。", ephemeral=True)
             return
 
         await interaction.response.send_message("🔒 チケットを閉じています。ログを保存中...", ephemeral=False)
 
-        # ログ収集
         log_text = f"=== チケットログ: {channel.name} ===\n"
         log_text += f"クローズ日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         log_text += f"クローズ者: {interaction.user} ({interaction.user.id})\n\n"
@@ -82,8 +106,7 @@ class TicketView(discord.ui.View):
             for attachment in msg.attachments:
                 log_text += f"  [添付ファイル: {attachment.url}]\n"
 
-        # ログチャンネルに送信
-        log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
+        log_channel = interaction.guild.get_channel(log_channel_id)
         if log_channel:
             log_file = discord.File(
                 fp=__import__("io").StringIO(log_text),
@@ -105,18 +128,25 @@ class TicketView(discord.ui.View):
 async def create_ticket(interaction: discord.Interaction, ticket_type: str, label: str):
     guild = interaction.guild
     member = interaction.user
+    config = get_config(guild.id)
 
-    # 既存チケットチェック
-    category = guild.get_channel(TICKET_CATEGORY_ID)
-    existing = discord.utils.get(category.channels, name=f"{ticket_type}-{member.name.lower()}")
-    if existing:
-        await interaction.response.send_message(
-            f"❌ すでにチケットがあります: {existing.mention}", ephemeral=True
-        )
+    if not config:
+        await interaction.response.send_message("❌ このサーバーはまだ設定されていません。管理者に `/setup` の実行を依頼してください。", ephemeral=True)
         return
 
-    # パーミッション設定
-    staff_role = guild.get_role(STAFF_ROLE_ID)
+    ticket_category_id, _, staff_role_id = config
+    category = guild.get_channel(ticket_category_id)
+
+    if not category:
+        await interaction.response.send_message("❌ チケットカテゴリが見つかりません。管理者に `/setup` の再設定を依頼してください。", ephemeral=True)
+        return
+
+    existing = discord.utils.get(category.channels, name=f"{ticket_type}-{member.name.lower()}")
+    if existing:
+        await interaction.response.send_message(f"❌ すでにチケットがあります: {existing.mention}", ephemeral=True)
+        return
+
+    staff_role = guild.get_role(staff_role_id)
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -148,10 +178,43 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str, labe
     await interaction.response.send_message(f"✅ チケットを作成しました: {channel.mention}", ephemeral=True)
 
 
+# ===== スラッシュコマンド: セットアップ =====
+@bot.tree.command(name="setup", description="このサーバーのチケットBot設定を行います（管理者のみ）")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    ticket_category="チケットを作成するカテゴリ",
+    log_channel="ログを送信するチャンネル",
+    staff_role="スタッフロール"
+)
+async def setup(
+    interaction: discord.Interaction,
+    ticket_category: discord.CategoryChannel,
+    log_channel: discord.TextChannel,
+    staff_role: discord.Role
+):
+    set_config(interaction.guild.id, ticket_category.id, log_channel.id, staff_role.id)
+    embed = discord.Embed(
+        title="✅ セットアップ完了",
+        description=(
+            f"**チケットカテゴリ:** {ticket_category.name}\n"
+            f"**ログチャンネル:** {log_channel.mention}\n"
+            f"**スタッフロール:** {staff_role.mention}"
+        ),
+        color=discord.Color.green(),
+        timestamp=datetime.now()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 # ===== スラッシュコマンド: パネル送信 =====
 @bot.tree.command(name="ticket-panel", description="チケットパネルを送信します（管理者のみ）")
 @app_commands.checks.has_permissions(administrator=True)
 async def send_panel(interaction: discord.Interaction):
+    config = get_config(interaction.guild.id)
+    if not config:
+        await interaction.response.send_message("❌ まず `/setup` でこのサーバーの設定を行ってください。", ephemeral=True)
+        return
+
     embed = discord.Embed(
         title="🎫 サポートチケット",
         description=(
@@ -169,7 +232,7 @@ async def send_panel(interaction: discord.Interaction):
 # ===== Bot起動時 =====
 @bot.event
 async def on_ready():
-    # Viewを永続化（再起動後もボタンが機能する）
+    init_db()
     bot.add_view(TicketPanelView())
     bot.add_view(TicketView())
 
