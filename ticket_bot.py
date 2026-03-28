@@ -8,6 +8,8 @@ import sqlite3
 
 # ===== 設定 =====
 TOKEN = os.environ.get("TOKEN")
+MAX_MESSAGE_LENGTH = 100   # これ以上の文字数で削除
+TIMEOUT_MINUTES = 5        # タイムアウト時間（分）
 # ================
 
 # ===== データベース初期化 =====
@@ -227,6 +229,40 @@ async def send_panel(interaction: discord.Interaction):
     )
     await interaction.channel.send(embed=embed, view=TicketPanelView())
     await interaction.response.send_message("✅ パネルを送信しました。", ephemeral=True)
+
+
+# ===== 荒らし対策: 長文スパム検知 =====
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    if message.author.guild_permissions.administrator:
+        return
+
+    # 空白を除いた文字数でチェック
+    content_stripped = message.content.replace(" ", "").replace("\n", "").replace("\u3000", "")
+    if len(content_stripped) > MAX_MESSAGE_LENGTH or len(message.content) > MAX_MESSAGE_LENGTH:
+        try:
+            await message.delete()
+        except discord.errors.Forbidden:
+            pass
+
+        from datetime import timedelta
+        timeout_until = discord.utils.utcnow() + timedelta(minutes=TIMEOUT_MINUTES)
+        try:
+            await message.author.timeout(timeout_until, reason="長文スパム検知による自動タイムアウト")
+        except discord.errors.Forbidden:
+            pass
+
+        try:
+            await message.channel.send(
+                f"{message.author.mention} 長文スパムを検知しました。{TIMEOUT_MINUTES}分間タイムアウトします。",
+                delete_after=10
+            )
+        except discord.errors.Forbidden:
+            pass
+
+    await bot.process_commands(message)
 
 
 # ===== Bot起動時 =====
