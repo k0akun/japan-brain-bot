@@ -16,7 +16,14 @@ SPAM_COUNT = 3             # 同じ内容を何回送ったらタイムアウト
 
 # ===== スパム検知用キャッシュ =====
 from collections import defaultdict
+import time
+from difflib import SequenceMatcher
 spam_cache = defaultdict(lambda: {"content": "", "count": 0})
+# 内容ベーススパム検知: [(user_id, content, timestamp), ...]
+content_spam_cache = []
+CONTENT_SPAM_USERS = 2     # 何人が似た内容を送ったらタイムアウト
+CONTENT_SPAM_SECONDS = 30  # 何秒以内にカウント
+CONTENT_SPAM_RATIO = 0.80  # 類似度しきい値（80%以上で一致とみなす）
 
 # ===== データベース初期化 =====
 def init_db():
@@ -301,6 +308,43 @@ async def on_message(message: discord.Message):
     if contains_blocked_link(message.content):
         await punish(message, "不正リンク検知", "リンクの送信は禁止されています。")
         return
+
+    # 内容ベーススパム検知（類似度80%以上で複数人が送ったらアウト）
+    now = time.time()
+    text = message.content.strip()
+    if text:
+        # 古いエントリを削除
+        content_spam_cache[:] = [
+            (uid, t, ts) for uid, t, ts in content_spam_cache
+            if now - ts < CONTENT_SPAM_SECONDS
+        ]
+
+        # 類似するエントリを探す
+        similar = [
+            (uid, t, ts) for uid, t, ts in content_spam_cache
+            if uid != message.author.id and SequenceMatcher(None, text, t).ratio() >= CONTENT_SPAM_RATIO
+        ]
+
+        content_spam_cache.append((message.author.id, text, now))
+
+        if len(similar) + 1 >= CONTENT_SPAM_USERS:
+            guilty = similar + [(message.author.id, text, now)]
+            # キャッシュから削除
+            guilty_ids = {uid for uid, _, _ in guilty}
+            content_spam_cache[:] = [
+                (uid, t, ts) for uid, t, ts in content_spam_cache
+                if uid not in guilty_ids
+            ]
+            for uid in guilty_ids:
+                member = message.guild.get_member(uid)
+                if member and not member.guild_permissions.administrator:
+                    try:
+                        timeout_until = discord.utils.utcnow() + timedelta(minutes=TIMEOUT_MINUTES)
+                        await member.timeout(timeout_until, reason="複数アカウントスパム検知")
+                    except (discord.errors.Forbidden, discord.errors.HTTPException):
+                        pass
+            await punish(message, "複数アカウントスパム検知", "複数アカウントによるスパムを検知しました。")
+            return
 
     await bot.process_commands(message)
 
