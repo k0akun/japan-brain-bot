@@ -40,7 +40,6 @@ def init_db():
             mod_log_channel_id INTEGER
         )
     """)
-    # 既存テーブルにカラムがなければ追加
     try:
         c.execute("ALTER TABLE server_config ADD COLUMN mod_log_channel_id INTEGER")
     except Exception:
@@ -54,7 +53,7 @@ def get_config(guild_id: int):
     c.execute("SELECT ticket_category_id, log_channel_id, staff_role_id FROM server_config WHERE guild_id = ?", (guild_id,))
     row = c.fetchone()
     conn.close()
-    return row  # (ticket_category_id, log_channel_id, staff_role_id) or None
+    return row
 
 def get_mod_log(guild_id: int):
     conn = sqlite3.connect("servers.db")
@@ -298,7 +297,6 @@ def contains_blocked_link(text: str) -> bool:
     return False
 
 def is_similar(a: str, b: str) -> bool:
-    """類似度80%以上 OR 前半8文字以上一致で同じ文とみなす"""
     if SequenceMatcher(None, a, b).ratio() >= CONTENT_SPAM_RATIO:
         return True
     prefix_len = CONTENT_SPAM_PREFIX
@@ -308,14 +306,12 @@ def is_similar(a: str, b: str) -> bool:
     return False
 
 async def punish(message: discord.Message, reason: str, notify: str):
-    # タイムアウトを先に実行
     timeout_until = discord.utils.utcnow() + timedelta(minutes=TIMEOUT_MINUTES)
     try:
         await message.author.timeout(timeout_until, reason=reason)
     except (discord.errors.Forbidden, discord.errors.HTTPException):
         pass
 
-    # そのユーザーの直近メッセージを一括削除（レートリミット対策）
     try:
         def is_target(m):
             return m.author.id == message.author.id
@@ -323,7 +319,6 @@ async def punish(message: discord.Message, reason: str, notify: str):
     except (discord.errors.Forbidden, discord.errors.HTTPException):
         pass
 
-    # 本人のみに通知（ephemeral風にDM送信）
     try:
         await message.author.send(
             f"⚠️ **{message.guild.name}** で自動タイムアウトされました。\n"
@@ -333,7 +328,6 @@ async def punish(message: discord.Message, reason: str, notify: str):
     except (discord.errors.Forbidden, discord.errors.HTTPException):
         pass
 
-    # モデレーターログに記録
     mod_log_id = get_mod_log(message.guild.id)
     if mod_log_id:
         log_channel = message.guild.get_channel(mod_log_id)
@@ -346,7 +340,17 @@ async def punish(message: discord.Message, reason: str, notify: str):
             embed.add_field(name="ユーザー", value=f"{message.author.mention} ({message.author.id})", inline=False)
             embed.add_field(name="理由", value=notify, inline=False)
             embed.add_field(name="チャンネル", value=message.channel.mention, inline=False)
-            embed.add_field(name="内容", value=message.content[:300] or "（空）", inline=False)
+
+            # ===== 修正: 内容欄にテキスト＋添付ファイル情報を表示 =====
+            content_display = message.content[:300] if message.content else ""
+            if message.attachments:
+                attachment_info = "\n".join([f"[添付: {a.filename}]" for a in message.attachments])
+                content_display = (content_display + "\n" + attachment_info).strip()
+            if not content_display:
+                content_display = "（空）"
+            embed.add_field(name="内容", value=content_display, inline=False)
+            # ==========================================================
+
             embed.add_field(name="タイムアウト時間", value=f"{TIMEOUT_MINUTES}分", inline=False)
             embed.set_thumbnail(url=message.author.display_avatar.url)
             try:
@@ -361,77 +365,77 @@ async def on_message(message: discord.Message):
     if message.author.guild_permissions.administrator:
         return
 
-    # 添付ファイルのみ（テキストなし）はスキップ
     text = message.content.strip()
 
-    if text:
-        # 長文チェック
-        content_stripped = text.replace(" ", "").replace("\n", "").replace("\u3000", "")
-        if len(content_stripped) > MAX_MESSAGE_LENGTH or len(text) > MAX_MESSAGE_LENGTH:
-            await punish(message, "長文スパム検知", "長文スパムを検知しました。")
-            return
+    # ===== 修正: 添付ファイルのみのメッセージはスパムカウントをリセットしてスキップ =====
+    if not text:
+        spam_cache[message.author.id] = {"content": "", "count": 0}
+        await bot.process_commands(message)
+        return
+    # ================================================================================
 
-        # 改行スパムチェック
-        if text.count("\n") >= MAX_NEWLINES:
-            await punish(message, "改行スパム検知", "改行スパムを検知しました。")
-            return
+    # 長文チェック
+    content_stripped = text.replace(" ", "").replace("\n", "").replace("\u3000", "")
+    if len(content_stripped) > MAX_MESSAGE_LENGTH or len(text) > MAX_MESSAGE_LENGTH:
+        await punish(message, "長文スパム検知", "長文スパムを検知しました。")
+        return
 
-        # 連続同一メッセージチェック（6文字以上のみ対象）
-        if len(text) >= 6:
-            cache = spam_cache[message.author.id]
-            if text == cache["content"]:
-                cache["count"] += 1
-            else:
-                cache["content"] = text
-                cache["count"] = 1
-            if cache["count"] >= SPAM_COUNT:
-                spam_cache[message.author.id] = {"content": "", "count": 0}
-                await punish(message, "連続スパム検知", "同じメッセージを連続で送信しています。")
-                return
+    # 改行スパムチェック
+    if text.count("\n") >= MAX_NEWLINES:
+        await punish(message, "改行スパム検知", "改行スパムを検知しました。")
+        return
+
+    # 連続同一メッセージチェック（6文字以上のみ対象）
+    if len(text) >= 6:
+        cache = spam_cache[message.author.id]
+        if text == cache["content"]:
+            cache["count"] += 1
         else:
+            cache["content"] = text
+            cache["count"] = 1
+        if cache["count"] >= SPAM_COUNT:
             spam_cache[message.author.id] = {"content": "", "count": 0}
+            await punish(message, "連続スパム検知", "同じメッセージを連続で送信しています。")
+            return
+    else:
+        spam_cache[message.author.id] = {"content": "", "count": 0}
 
     # リンクチェック（YouTube以外をブロック）
     if contains_blocked_link(message.content):
         await punish(message, "不正リンク検知", "リンクの送信は禁止されています。")
         return
 
-    # 内容ベーススパム検知（類似度80%以上で複数人が送ったらアウト）
+    # 内容ベーススパム検知
     now = time.time()
-    text = message.content.strip()
-    if text:
-        # 古いエントリを削除
+    content_spam_cache[:] = [
+        (uid, t, ts) for uid, t, ts in content_spam_cache
+        if now - ts < CONTENT_SPAM_SECONDS
+    ]
+
+    similar = [
+        (uid, t, ts) for uid, t, ts in content_spam_cache
+        if uid != message.author.id and SequenceMatcher(None, text, t).ratio() >= CONTENT_SPAM_RATIO
+    ]
+
+    content_spam_cache.append((message.author.id, text, now))
+
+    if len(similar) + 1 >= CONTENT_SPAM_USERS:
+        guilty = similar + [(message.author.id, text, now)]
+        guilty_ids = {uid for uid, _, _ in guilty}
         content_spam_cache[:] = [
             (uid, t, ts) for uid, t, ts in content_spam_cache
-            if now - ts < CONTENT_SPAM_SECONDS
+            if uid not in guilty_ids
         ]
-
-        # 類似するエントリを探す
-        similar = [
-            (uid, t, ts) for uid, t, ts in content_spam_cache
-            if uid != message.author.id and SequenceMatcher(None, text, t).ratio() >= CONTENT_SPAM_RATIO
-        ]
-
-        content_spam_cache.append((message.author.id, text, now))
-
-        if len(similar) + 1 >= CONTENT_SPAM_USERS:
-            guilty = similar + [(message.author.id, text, now)]
-            # キャッシュから削除
-            guilty_ids = {uid for uid, _, _ in guilty}
-            content_spam_cache[:] = [
-                (uid, t, ts) for uid, t, ts in content_spam_cache
-                if uid not in guilty_ids
-            ]
-            for uid in guilty_ids:
-                member = message.guild.get_member(uid)
-                if member and not member.guild_permissions.administrator:
-                    try:
-                        timeout_until = discord.utils.utcnow() + timedelta(minutes=TIMEOUT_MINUTES)
-                        await member.timeout(timeout_until, reason="複数アカウントスパム検知")
-                    except (discord.errors.Forbidden, discord.errors.HTTPException):
-                        pass
-            await punish(message, "複数アカウントスパム検知", "複数アカウントによるスパムを検知しました。")
-            return
+        for uid in guilty_ids:
+            member = message.guild.get_member(uid)
+            if member and not member.guild_permissions.administrator:
+                try:
+                    timeout_until = discord.utils.utcnow() + timedelta(minutes=TIMEOUT_MINUTES)
+                    await member.timeout(timeout_until, reason="複数アカウントスパム検知")
+                except (discord.errors.Forbidden, discord.errors.HTTPException):
+                    pass
+        await punish(message, "複数アカウントスパム検知", "複数アカウントによるスパムを検知しました。")
+        return
 
     await bot.process_commands(message)
 
