@@ -9,7 +9,7 @@ import re
 
 # ===== 設定 =====
 TOKEN = os.environ.get("TOKEN")
-MAX_MESSAGE_LENGTH = 200   # これ以上の文字数で削除
+MAX_MESSAGE_LENGTH = 140   # これ以上の文字数で削除
 TIMEOUT_MINUTES = 5        # タイムアウト時間（分）
 # ================
 
