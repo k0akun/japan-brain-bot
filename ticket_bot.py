@@ -21,8 +21,8 @@ from difflib import SequenceMatcher
 spam_cache = defaultdict(lambda: {"content": "", "count": 0})
 # 内容ベーススパム検知: [(user_id, content, timestamp), ...]
 content_spam_cache = []
-CONTENT_SPAM_USERS = 2     # 何人が似た内容を送ったらタイムアウト
-CONTENT_SPAM_SECONDS = 30  # 何秒以内にカウント
+CONTENT_SPAM_USERS = 4     # 何人が似た内容を送ったらタイムアウト
+CONTENT_SPAM_SECONDS = 10  # 何秒以内にカウント
 CONTENT_SPAM_RATIO = 0.80  # 類似度しきい値（80%以上で一致とみなす）
 MAX_NEWLINES = 10          # これ以上の改行で削除＋タイムアウト
 
