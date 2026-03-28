@@ -2,9 +2,10 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import sqlite3
+import re
 
 # ===== 設定 =====
 TOKEN = os.environ.get("TOKEN")
@@ -231,7 +232,35 @@ async def send_panel(interaction: discord.Interaction):
     await interaction.response.send_message("✅ パネルを送信しました。", ephemeral=True)
 
 
-# ===== 荒らし対策: 長文スパム検知 =====
+# ===== 荒らし対策 =====
+URL_PATTERN = re.compile(r"https?://[^\s]+|discord\.gg/[^\s]+")
+ALLOWED_DOMAINS = ("youtube.com", "youtu.be", "www.youtube.com")
+
+def contains_blocked_link(text: str) -> bool:
+    urls = URL_PATTERN.findall(text)
+    for url in urls:
+        if not any(domain in url for domain in ALLOWED_DOMAINS):
+            return True
+    return False
+
+async def punish(message: discord.Message, reason: str, notify: str):
+    try:
+        await message.delete()
+    except discord.errors.Forbidden:
+        pass
+    timeout_until = discord.utils.utcnow() + timedelta(minutes=TIMEOUT_MINUTES)
+    try:
+        await message.author.timeout(timeout_until, reason=reason)
+    except discord.errors.Forbidden:
+        pass
+    try:
+        await message.channel.send(
+            f"{message.author.mention} {notify} {TIMEOUT_MINUTES}分間タイムアウトします。",
+            delete_after=10
+        )
+    except discord.errors.Forbidden:
+        pass
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -239,28 +268,16 @@ async def on_message(message: discord.Message):
     if message.author.guild_permissions.administrator:
         return
 
-    # 空白を除いた文字数でチェック
+    # 長文チェック
     content_stripped = message.content.replace(" ", "").replace("\n", "").replace("\u3000", "")
     if len(content_stripped) > MAX_MESSAGE_LENGTH or len(message.content) > MAX_MESSAGE_LENGTH:
-        try:
-            await message.delete()
-        except discord.errors.Forbidden:
-            pass
+        await punish(message, "長文スパム検知", "長文スパムを検知しました。")
+        return
 
-        from datetime import timedelta
-        timeout_until = discord.utils.utcnow() + timedelta(minutes=TIMEOUT_MINUTES)
-        try:
-            await message.author.timeout(timeout_until, reason="長文スパム検知による自動タイムアウト")
-        except discord.errors.Forbidden:
-            pass
-
-        try:
-            await message.channel.send(
-                f"{message.author.mention} 長文スパムを検知しました。{TIMEOUT_MINUTES}分間タイムアウトします。",
-                delete_after=10
-            )
-        except discord.errors.Forbidden:
-            pass
+    # リンクチェック（YouTube以外をブロック）
+    if contains_blocked_link(message.content):
+        await punish(message, "不正リンク検知", "リンクの送信は禁止されています。")
+        return
 
     await bot.process_commands(message)
 
