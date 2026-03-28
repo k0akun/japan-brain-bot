@@ -28,6 +28,7 @@ def load_config():
     return {
         "ticket_category_id": None,
         "log_channel_id": None,
+        "mod_log_channel_id": None,
     }
 
 def save_config(cfg):
@@ -41,6 +42,10 @@ def get_ticket_category_id():
 
 def get_log_channel_id():
     return config.get("log_channel_id")
+
+def get_mod_log_channel_id():
+    # 未設定の場合はチケットログチャンネルにフォールバック
+    return config.get("mod_log_channel_id") or config.get("log_channel_id")
 
 # ===== 禁止ワードをJSONで管理 =====
 BAD_WORDS_FILE = "bad_words.json"
@@ -273,7 +278,9 @@ async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, 
 # ===========================
 
 async def log_action(guild: discord.Guild, action: str, user, detail: str = ""):
-    log_channel = guild.get_channel(get_log_channel_id())
+    """モデレーションログ（警告・キック・BAN・AutoModなど）"""
+    ch_id = get_mod_log_channel_id()
+    log_channel = guild.get_channel(ch_id) if ch_id else None
     if not log_channel:
         return
     embed = discord.Embed(
@@ -283,6 +290,15 @@ async def log_action(guild: discord.Guild, action: str, user, detail: str = ""):
         timestamp=datetime.now(timezone.utc)
     )
     await log_channel.send(embed=embed)
+
+
+async def log_ticket(guild: discord.Guild, embed: discord.Embed, file=None):
+    """チケットログ専用"""
+    ch_id = get_log_channel_id()
+    log_channel = guild.get_channel(ch_id) if ch_id else None
+    if not log_channel:
+        return
+    await log_channel.send(embed=embed, file=file)
 
 
 # ===========================
@@ -383,13 +399,21 @@ async def setup_ticket_category(interaction: discord.Interaction, category: disc
     save_config(config)
     await interaction.response.send_message(f"✅ チケットカテゴリを **{category.name}** に設定しました！", ephemeral=True)
 
-@bot.tree.command(name="setup-log-channel", description="ログを送るチャンネルを設定します（管理者のみ）")
-@app_commands.describe(channel="ログチャンネル")
+@bot.tree.command(name="setup-log-channel", description="チケットログを送るチャンネルを設定します（管理者のみ）")
+@app_commands.describe(channel="チケットログチャンネル")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_log_channel(interaction: discord.Interaction, channel: discord.TextChannel):
     config["log_channel_id"] = channel.id
     save_config(config)
-    await interaction.response.send_message(f"✅ ログチャンネルを **{channel.name}** に設定しました！", ephemeral=True)
+    await interaction.response.send_message(f"✅ チケットログチャンネルを {channel.mention} に設定しました！", ephemeral=True)
+
+@bot.tree.command(name="setup-mod-log-channel", description="警告・BAN・キックなどのログチャンネルを設定します（管理者のみ）")
+@app_commands.describe(channel="モデレーションログチャンネル")
+@app_commands.checks.has_permissions(administrator=True)
+async def setup_mod_log_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    config["mod_log_channel_id"] = channel.id
+    save_config(config)
+    await interaction.response.send_message(f"✅ モデレーションログチャンネルを {channel.mention} に設定しました！", ephemeral=True)
 
 @bot.tree.command(name="setup-check", description="現在の設定を確認します（管理者のみ）")
 @app_commands.checks.has_permissions(administrator=True)
@@ -397,11 +421,14 @@ async def setup_check(interaction: discord.Interaction):
     guild = interaction.guild
     cat_id = get_ticket_category_id()
     log_id = get_log_channel_id()
+    mod_log_id = config.get("mod_log_channel_id")
     category = guild.get_channel(cat_id) if cat_id else None
     log_ch = guild.get_channel(log_id) if log_id else None
+    mod_log_ch = guild.get_channel(mod_log_id) if mod_log_id else None
     embed = discord.Embed(title="⚙️ 現在の設定", color=discord.Color.blurple())
     embed.add_field(name="🎫 チケットカテゴリ", value=category.name if category else "❌ 未設定", inline=False)
-    embed.add_field(name="📋 ログチャンネル", value=log_ch.mention if log_ch else "❌ 未設定", inline=False)
+    embed.add_field(name="📋 チケットログチャンネル", value=log_ch.mention if log_ch else "❌ 未設定", inline=False)
+    embed.add_field(name="🔨 モデレーションログチャンネル", value=mod_log_ch.mention if mod_log_ch else f"⚠️ 未設定（チケットログと共用）", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -457,7 +484,7 @@ class TicketView(discord.ui.View):
             import io
             log_file = discord.File(fp=io.StringIO(log_text), filename=f"{channel.name}-{datetime.now().strftime('%Y%m%d%H%M%S')}.txt")
             embed = discord.Embed(title="📋 チケットログ", description=f"チャンネル: `{channel.name}`\nクローズ者: {interaction.user.mention}", color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
-            await log_channel.send(embed=embed, file=log_file)
+            await log_ticket(interaction.guild, embed, log_file)
 
         await asyncio.sleep(3)
         await channel.delete(reason=f"チケットクローズ by {interaction.user}")
