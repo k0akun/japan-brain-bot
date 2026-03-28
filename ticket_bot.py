@@ -11,7 +11,12 @@ import re
 TOKEN = os.environ.get("TOKEN")
 MAX_MESSAGE_LENGTH = 140   # これ以上の文字数で削除
 TIMEOUT_MINUTES = 5        # タイムアウト時間（分）
+SPAM_COUNT = 3             # 同じ内容を何回送ったらタイムアウトか
 # ================
+
+# ===== スパム検知用キャッシュ =====
+from collections import defaultdict
+spam_cache = defaultdict(lambda: {"content": "", "count": 0})
 
 # ===== データベース初期化 =====
 def init_db():
@@ -272,6 +277,18 @@ async def on_message(message: discord.Message):
     content_stripped = message.content.replace(" ", "").replace("\n", "").replace("\u3000", "")
     if len(content_stripped) > MAX_MESSAGE_LENGTH or len(message.content) > MAX_MESSAGE_LENGTH:
         await punish(message, "長文スパム検知", "長文スパムを検知しました。")
+        return
+
+    # 連続同一メッセージチェック
+    cache = spam_cache[message.author.id]
+    if message.content == cache["content"]:
+        cache["count"] += 1
+    else:
+        cache["content"] = message.content
+        cache["count"] = 1
+    if cache["count"] >= SPAM_COUNT:
+        spam_cache[message.author.id] = {"content": "", "count": 0}
+        await punish(message, "連続スパム検知", "同じメッセージを連続で送信しています。")
         return
 
     # リンクチェック（YouTube以外をブロック）
