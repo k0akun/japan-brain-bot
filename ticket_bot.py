@@ -767,6 +767,44 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str, labe
     await interaction.response.send_message(f"✅ チケットを作成しました: {channel.mention}", ephemeral=True)
 
 
+@bot.tree.command(name="botstatus", description="Botの現在の設定を全員に表示します")
+async def botstatus(interaction: discord.Interaction):
+    guild = interaction.guild
+    cat_id = config.get("ticket_category_id")
+    auth_cat_id = config.get("auth_category_id")
+    log_id = config.get("log_channel_id")
+    mod_log_id = config.get("mod_log_channel_id")
+    category = guild.get_channel(cat_id) if cat_id else None
+    auth_cat = guild.get_channel(auth_cat_id) if auth_cat_id else None
+    log_ch = guild.get_channel(log_id) if log_id else None
+    mod_log_ch = guild.get_channel(mod_log_id) if mod_log_id else None
+
+
+@bot.tree.command(name="botstatus", description="Botの現在の設定を全員に表示します")
+async def botstatus(interaction: discord.Interaction):
+    guild = interaction.guild
+    cat_id = config.get("ticket_category_id")
+    auth_cat_id = config.get("auth_category_id")
+    log_id = config.get("log_channel_id")
+    mod_log_id = config.get("mod_log_channel_id")
+    category = guild.get_channel(cat_id) if cat_id else None
+    auth_cat = guild.get_channel(auth_cat_id) if auth_cat_id else None
+    log_ch = guild.get_channel(log_id) if log_id else None
+    mod_log_ch = guild.get_channel(mod_log_id) if mod_log_id else None
+    embed = discord.Embed(title="\U0001f916 Bot設定状況", color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc))
+    embed.add_field(name="\U0001f3ab チケットカテゴリ", value=category.name if category else "\u274c 未設定", inline=True)
+    embed.add_field(name="\U0001f511 認証チケットカテゴリ", value=auth_cat.name if auth_cat else "\u274c 未設定", inline=True)
+    embed.add_field(name="\U0001f4cb チケットログ", value=log_ch.mention if log_ch else "\u274c 未設定", inline=True)
+    embed.add_field(name="\U0001f528 モデレーションログ", value=mod_log_ch.mention if mod_log_ch else "チケットログと共用", inline=True)
+    embed.add_field(name="\U0001f6e1️ AutoMod設定", value=f"長文検知: **{MAX_MESSAGE_LENGTH}文字**以上\n改行スパム: **{MAX_NEWLINES}回**以上\n連続スパム: **{SPAM_COUNT}回**連続\n複数垂スパム: **{CONTENT_SPAM_SECONDS}秒**以内に**{CONTENT_SPAM_USERS}人**\n自動TO: **{TIMEOUT_MINUTES}分**", inline=False)
+    domain_list = "\n".join([f"・{d}" for d in ALLOWED_DOMAINS]) if ALLOWED_DOMAINS else "なし"
+    embed.add_field(name="\U0001f517 許可URL", value=domain_list, inline=False)
+    word_list = "　".join([f"`{w}`" for w in BAD_WORDS]) if BAD_WORDS else "なし"
+    embed.add_field(name="\U0001f6ab 禁止ワード", value=word_list, inline=False)
+    embed.add_field(name="\u26a0️ 警告システム", value="3回 → 5分TO　5回 → 30分TO　7回以上 → 1時間TO", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
 @bot.tree.command(name="auth-panel", description="認証リクエストパネルを送信します（管理者のみ）")
 @app_commands.checks.has_permissions(administrator=True)
 async def send_auth_panel(interaction: discord.Interaction):
