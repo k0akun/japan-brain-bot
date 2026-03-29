@@ -578,10 +578,6 @@ class TicketPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="📋 モデレーター応募", style=discord.ButtonStyle.primary, custom_id="ticket_mod")
-    async def ticket_mod(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await create_ticket(interaction, "mod-application", "モデレーター応募")
-
     @discord.ui.button(label="❓ サポート・質問", style=discord.ButtonStyle.success, custom_id="ticket_support")
     async def ticket_support(self, interaction: discord.Interaction, button: discord.ui.Button):
         await create_ticket(interaction, "support", "サポート・質問")
@@ -709,7 +705,7 @@ async def send_auth_panel(interaction: discord.Interaction):
 @bot.tree.command(name="ticket-panel", description="チケットパネルを送信します（管理者のみ）")
 @app_commands.checks.has_permissions(administrator=True)
 async def send_panel(interaction: discord.Interaction):
-    embed = discord.Embed(title="🎫 サポートチケット", description="お問い合わせ内容に合わせてボタンを押してチケットを作成してください。\n\n📋 **モデレーター応募** — モデレーターに応募したい方\n❓ **サポート・質問** — サーバーに関する質問・サポート\n📩 **その他・お問い合わせ** — その他のお問い合わせ", color=discord.Color.blurple())
+    embed = discord.Embed(title="🎫 サポートチケット", description="お問い合わせ内容に合わせてボタンを押してチケットを作成してください。\n\n❓ **サポート・質問** — サーバーに関する質問・サポート\n📩 **その他・お問い合わせ** — その他のお問い合わせ", color=discord.Color.blurple())
     await interaction.channel.send(embed=embed, view=TicketPanelView())
     await interaction.response.send_message("✅ パネルを送信しました。", ephemeral=True)
 
@@ -722,7 +718,8 @@ async def send_panel(interaction: discord.Interaction):
 # ===== 認証チケット自動削除 =====
 # ===========================
 
-AUTH_TICKET_TIMEOUT_HOURS = 5  # 何時間メッセージがなければ削除するか
+TICKET_TIMEOUT_MINUTES = 10   # 通常チケット: 何分応答がなければ削除するか
+AUTH_TICKET_TIMEOUT_HOURS = 0.167  # 認証チケット: 10分（=10/60時間）
 
 @bot.event
 async def on_ready():
@@ -738,44 +735,61 @@ async def on_ready():
     print(f"✅ {bot.user} としてログインしました")
 
 
-@tasks.loop(minutes=30)
+@tasks.loop(minutes=2)
 async def check_auth_tickets():
-    """認証チケットを5時間メッセージがなければ自動削除"""
+    """チケットを10分応答がなければ自動削除"""
     from datetime import timedelta, timezone as tz
     auth_cat_id = config.get("auth_category_id")
-    if not auth_cat_id:
-        return
-    for guild in bot.guilds:
-        category = guild.get_channel(auth_cat_id)
-        if not category:
-            continue
-        for channel in category.text_channels:
-            if not channel.name.startswith("auth-request-"):
-                continue
-            try:
-                # ボット以外のメッセージが1つでもあれば削除しない
-                human_msgs = []
-                async for msg in channel.history(limit=50):
-                    if not msg.author.bot:
-                        human_msgs.append(msg)
-                        break
-                if human_msgs:
-                    continue
+    ticket_cat_id = config.get("ticket_category_id")
 
-                # ボットのみのメッセージしかない場合、チャンネル作成から5時間で削除
-                now = datetime.now(tz.utc)
-                if (now - channel.created_at).total_seconds() > AUTH_TICKET_TIMEOUT_HOURS * 3600:
-                    log_channel = guild.get_channel(config.get("log_channel_id"))
-                    if log_channel:
-                        embed = discord.Embed(
-                            title="🗑️ 認証チケット自動削除",
-                            description=f"チャンネル: `{channel.name}`\n{AUTH_TICKET_TIMEOUT_HOURS}時間応答がなかったため自動削除しました。",
-                            color=discord.Color.red(),
-                            timestamp=datetime.now(tz.utc)
-                        )
-                        await log_channel.send(embed=embed)
-                    await channel.delete(reason=f"認証チケット: {AUTH_TICKET_TIMEOUT_HOURS}時間無応答のため自動削除")
-            except Exception:
-                pass
+    for guild in bot.guilds:
+        # 認証チケット（10分）
+        if auth_cat_id:
+            category = guild.get_channel(auth_cat_id)
+            if category:
+                for channel in list(category.text_channels):
+                    if not channel.name.startswith("auth-request-"):
+                        continue
+                    await _auto_delete_ticket(guild, channel, minutes=10)
+
+        # 通常チケット（10分）
+        if ticket_cat_id:
+            category = guild.get_channel(ticket_cat_id)
+            if category:
+                for channel in list(category.text_channels):
+                    await _auto_delete_ticket(guild, channel, minutes=10)
+
+
+async def _auto_delete_ticket(guild, channel, minutes: int):
+    """最後のメッセージから指定分数経過していたら削除"""
+    from datetime import timedelta, timezone as tz
+    try:
+        now = datetime.now(tz.utc)
+        last_msg = None
+        async for msg in channel.history(limit=1):
+            last_msg = msg
+
+        if last_msg is None:
+            # メッセージが1件もない場合はチャンネル作成時刻で判断
+            if (now - channel.created_at).total_seconds() > minutes * 60:
+                await _delete_and_log(guild, channel, minutes)
+        else:
+            if (now - last_msg.created_at).total_seconds() > minutes * 60:
+                await _delete_and_log(guild, channel, minutes)
+    except Exception:
+        pass
+
+
+async def _delete_and_log(guild, channel, minutes: int):
+    log_channel = guild.get_channel(config.get("log_channel_id"))
+    if log_channel:
+        embed = discord.Embed(
+            title="🗑️ チケット自動削除",
+            description=f"チャンネル: `{channel.name}`\n{minutes}分間応答がなかったため自動削除しました。",
+            color=discord.Color.red(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        await log_channel.send(embed=embed)
+    await channel.delete(reason=f"{minutes}分無応答のため自動削除")
 
 bot.run(TOKEN)
