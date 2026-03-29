@@ -5,6 +5,8 @@ import asyncio
 from datetime import datetime, timezone
 import os
 import json
+import io
+import aiohttp
 from collections import defaultdict
 from difflib import SequenceMatcher
 import re
@@ -70,7 +72,7 @@ def load_bad_words():
     if os.path.exists(BAD_WORDS_FILE):
         with open(BAD_WORDS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return ["死ね", "殺す", "アホ", "シコシコ", "クンニ", "障害者", "しこしこ"]
+    return ["死ね", "殺す", "アホ", "シコシコ", "クンニ", "障害者", "しこしこ", "うんち", "うんこ", "だまれ", "sex"]
 
 def save_bad_words(words):
     with open(BAD_WORDS_FILE, "w", encoding="utf-8") as f:
@@ -82,8 +84,6 @@ BAD_WORDS = load_bad_words()
 ALLOWED_DOMAINS = [
     "youtube.com",
     "youtu.be",
-    "tenor.com",
-    "cdn.discordapp.com",
 ]
 
 intents = discord.Intents.default()
@@ -711,6 +711,187 @@ async def send_panel(interaction: discord.Interaction):
 
 
 # ===========================
+# ===========================
+# ===== バックアップ・復元 =====
+# ===========================
+
+@bot.tree.command(name="backup", description="サーバーのチャンネル構成とロールをバックアップします（管理者のみ）")
+@app_commands.checks.has_permissions(administrator=True)
+async def backup(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    # ロール保存
+    roles = []
+    for role in guild.roles:
+        if role.is_default():
+            continue
+        roles.append({
+            "name": role.name,
+            "color": role.color.value,
+            "hoist": role.hoist,
+            "mentionable": role.mentionable,
+            "permissions": role.permissions.value,
+            "position": role.position,
+        })
+
+    # カテゴリ・チャンネル保存
+    categories = []
+    no_category_channels = []
+
+    for category in guild.categories:
+        channels = []
+        for ch in category.channels:
+            channels.append({
+                "name": ch.name,
+                "type": str(ch.type),
+                "position": ch.position,
+                "topic": getattr(ch, "topic", None),
+                "nsfw": getattr(ch, "nsfw", False),
+                "slowmode_delay": getattr(ch, "slowmode_delay", 0),
+            })
+        categories.append({
+            "name": category.name,
+            "position": category.position,
+            "channels": channels,
+        })
+
+    for ch in guild.channels:
+        if ch.category is None and not isinstance(ch, discord.CategoryChannel):
+            no_category_channels.append({
+                "name": ch.name,
+                "type": str(ch.type),
+                "position": ch.position,
+            })
+
+    backup_data = {
+        "guild_name": guild.name,
+        "backup_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "roles": sorted(roles, key=lambda r: r["position"]),
+        "categories": sorted(categories, key=lambda c: c["position"]),
+        "no_category_channels": no_category_channels,
+    }
+
+    # JSONファイルとして保存
+    filename = f"backup-{guild.id}-{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
+    json_bytes = json.dumps(backup_data, ensure_ascii=False, indent=2).encode("utf-8")
+    file = discord.File(fp=io.BytesIO(json_bytes), filename=filename)
+
+    embed = discord.Embed(
+        title="✅ バックアップ完了",
+        description=(
+            f"**サーバー:** {guild.name}\n"
+            f"**ロール数:** {len(roles)}\n"
+            f"**カテゴリ数:** {len(categories)}\n"
+            f"**日時:** {backup_data['backup_at']}\n\n"
+            f"⚠️ このファイルを大切に保管してください。\n"
+            f"復元するには `/restore` でこのファイルを添付してください。"
+        ),
+        color=discord.Color.green()
+    )
+    await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+
+
+@bot.tree.command(name="restore", description="バックアップからチャンネル構成とロールを復元します（管理者のみ）")
+@app_commands.describe(file="backupコマンドで生成したJSONファイル")
+@app_commands.checks.has_permissions(administrator=True)
+async def restore(interaction: discord.Interaction, file: discord.Attachment):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    if not file.filename.endswith(".json"):
+        await interaction.followup.send("❌ JSONファイルを添付してください。", ephemeral=True)
+        return
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(file.url) as resp:
+            raw = await resp.text()
+
+    try:
+        data = json.loads(raw)
+    except Exception:
+        await interaction.followup.send("❌ ファイルの読み込みに失敗しました。", ephemeral=True)
+        return
+
+    results = []
+
+    # ロール復元
+    existing_role_names = {r.name for r in guild.roles}
+    created_roles = 0
+    for role_data in sorted(data.get("roles", []), key=lambda r: r["position"]):
+        if role_data["name"] in existing_role_names:
+            continue
+        try:
+            await guild.create_role(
+                name=role_data["name"],
+                color=discord.Color(role_data["color"]),
+                hoist=role_data["hoist"],
+                mentionable=role_data["mentionable"],
+                permissions=discord.Permissions(role_data["permissions"]),
+            )
+            created_roles += 1
+            await asyncio.sleep(0.5)
+        except Exception:
+            pass
+    results.append(f"✅ ロール: {created_roles}個作成")
+
+    # カテゴリ・チャンネル復元
+    existing_channel_names = {c.name for c in guild.channels}
+    created_categories = 0
+    created_channels = 0
+
+    for cat_data in sorted(data.get("categories", []), key=lambda c: c["position"]):
+        # カテゴリ作成
+        if cat_data["name"] not in existing_channel_names:
+            try:
+                category = await guild.create_category(name=cat_data["name"])
+                created_categories += 1
+                await asyncio.sleep(0.5)
+            except Exception:
+                continue
+        else:
+            category = discord.utils.get(guild.categories, name=cat_data["name"])
+
+        if category is None:
+            continue
+
+        # チャンネル作成
+        for ch_data in sorted(cat_data.get("channels", []), key=lambda c: c["position"]):
+            if ch_data["name"] in existing_channel_names:
+                continue
+            try:
+                if ch_data["type"] == "text":
+                    await guild.create_text_channel(
+                        name=ch_data["name"],
+                        category=category,
+                        topic=ch_data.get("topic"),
+                        nsfw=ch_data.get("nsfw", False),
+                        slowmode_delay=ch_data.get("slowmode_delay", 0),
+                    )
+                elif ch_data["type"] == "voice":
+                    await guild.create_voice_channel(
+                        name=ch_data["name"],
+                        category=category,
+                    )
+                created_channels += 1
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+    results.append(f"✅ カテゴリ: {created_categories}個作成")
+    results.append(f"✅ チャンネル: {created_channels}個作成")
+    results.append(f"⚠️ すでに存在するロール・チャンネルはスキップしました")
+    results.append(f"⚠️ メッセージ履歴は復元できません")
+
+    embed = discord.Embed(
+        title="✅ 復元完了",
+        description="\n".join(results),
+        color=discord.Color.green(),
+        timestamp=datetime.now(timezone.utc)
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 # ===== Bot起動時 =====
 # ===========================
 
@@ -724,6 +905,7 @@ AUTH_TICKET_TIMEOUT_HOURS = 0.083  # 認証チケット: 5分（=5/60時間）
 @bot.event
 async def on_ready():
     check_auth_tickets.start()
+    auto_backup.start()
     bot.add_view(TicketPanelView())
     bot.add_view(AuthPanelView())
     bot.add_view(TicketView())
@@ -761,21 +943,21 @@ async def check_auth_tickets():
 
 
 async def _auto_delete_ticket(guild, channel, minutes: int):
-    """最後のメッセージから指定分数経過していたら削除"""
-    from datetime import timedelta, timezone as tz
+    """ユーザーのメッセージが一切なく、チャンネル作成から指定分数経過したら削除"""
+    from datetime import timezone as tz
     try:
         now = datetime.now(tz.utc)
-        last_msg = None
-        async for msg in channel.history(limit=1):
-            last_msg = msg
+        # チャンネル作成から指定分数経過していなければスキップ
+        if (now - channel.created_at).total_seconds() < minutes * 60:
+            return
 
-        if last_msg is None:
-            # メッセージが1件もない場合はチャンネル作成時刻で判断
-            if (now - channel.created_at).total_seconds() > minutes * 60:
-                await _delete_and_log(guild, channel, minutes)
-        else:
-            if (now - last_msg.created_at).total_seconds() > minutes * 60:
-                await _delete_and_log(guild, channel, minutes)
+        # 人間のメッセージが1件でもあれば削除しない
+        async for msg in channel.history(limit=50):
+            if not msg.author.bot:
+                return  # 人間のメッセージあり → 削除しない
+
+        # Bot発言のみ & 時間経過 → 削除
+        await _delete_and_log(guild, channel, minutes)
     except Exception:
         pass
 
@@ -791,5 +973,131 @@ async def _delete_and_log(guild, channel, minutes: int):
         )
         await log_channel.send(embed=embed)
     await channel.delete(reason=f"{minutes}分無応答のため自動削除")
+
+
+# ===========================
+# ===== バックアップ機能 =====
+# ===========================
+
+BACKUP_FILE = "backup.json"
+BACKUP_INTERVAL_HOURS = 24  # 自動バックアップの間隔（時間）
+
+def save_backup(data: dict):
+    with open(BACKUP_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+async def create_backup(guild: discord.Guild) -> dict:
+    """サーバーのチャンネル構成とロールをバックアップ"""
+    backup = {
+        "guild_name": guild.name,
+        "guild_id": guild.id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "roles": [],
+        "categories": [],
+    }
+
+    # ロール一覧（@everyoneを除く）
+    for role in guild.roles:
+        if role.name == "@everyone":
+            continue
+        backup["roles"].append({
+            "name": role.name,
+            "color": role.color.value,
+            "hoist": role.hoist,
+            "mentionable": role.mentionable,
+            "permissions": role.permissions.value,
+            "position": role.position,
+        })
+
+    # カテゴリ＆チャンネル構成
+    for category in guild.categories:
+        cat_data = {
+            "name": category.name,
+            "position": category.position,
+            "channels": []
+        }
+        for channel in category.channels:
+            cat_data["channels"].append({
+                "name": channel.name,
+                "type": str(channel.type),
+                "position": channel.position,
+                "topic": getattr(channel, "topic", None),
+                "nsfw": getattr(channel, "nsfw", False),
+                "slowmode": getattr(channel, "slowmode_delay", 0),
+            })
+        backup["categories"].append(cat_data)
+
+    # カテゴリなしチャンネル
+    no_category = {
+        "name": "（カテゴリなし）",
+        "position": -1,
+        "channels": []
+    }
+    for channel in guild.channels:
+        if channel.category is None and not isinstance(channel, discord.CategoryChannel):
+            no_category["channels"].append({
+                "name": channel.name,
+                "type": str(channel.type),
+                "position": channel.position,
+                "topic": getattr(channel, "topic", None),
+                "nsfw": getattr(channel, "nsfw", False),
+                "slowmode": getattr(channel, "slowmode_delay", 0),
+            })
+    if no_category["channels"]:
+        backup["categories"].append(no_category)
+
+    return backup
+
+
+@bot.tree.command(name="backup", description="サーバーのチャンネル構成とロールをバックアップします（管理者のみ）")
+@app_commands.checks.has_permissions(administrator=True)
+async def backup_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    data = await create_backup(guild)
+    save_backup(data)
+
+    # JSONファイルとして送信
+    import io
+    json_bytes = io.BytesIO(json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
+    file = discord.File(fp=json_bytes, filename=f"backup-{guild.name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json")
+
+    role_count = len(data["roles"])
+    channel_count = sum(len(c["channels"]) for c in data["categories"])
+    cat_count = len(data["categories"])
+
+    embed = discord.Embed(
+        title="✅ バックアップ完了",
+        description=(
+            f"📁 カテゴリ: **{cat_count}個**\n"
+            f"💬 チャンネル: **{channel_count}個**\n"
+            f"🏷️ ロール: **{role_count}個**"
+        ),
+        color=discord.Color.green(),
+        timestamp=datetime.now(timezone.utc)
+    )
+    await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+    await log_action(guild, "💾 バックアップ実行", interaction.user, f"カテゴリ{cat_count}・チャンネル{channel_count}・ロール{role_count}個")
+
+
+@tasks.loop(hours=BACKUP_INTERVAL_HOURS)
+async def auto_backup():
+    """定期自動バックアップ"""
+    for guild in bot.guilds:
+        data = await create_backup(guild)
+        save_backup(data)
+        log_ch_id = config.get("mod_log_channel_id") or config.get("log_channel_id")
+        log_channel = guild.get_channel(log_ch_id) if log_ch_id else None
+        if log_channel:
+            role_count = len(data["roles"])
+            channel_count = sum(len(c["channels"]) for c in data["categories"])
+            embed = discord.Embed(
+                title="💾 自動バックアップ完了",
+                description=f"チャンネル: **{channel_count}個** / ロール: **{role_count}個**",
+                color=discord.Color.blurple(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            await log_channel.send(embed=embed)
+
 
 bot.run(TOKEN)
