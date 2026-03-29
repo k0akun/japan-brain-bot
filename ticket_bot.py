@@ -206,16 +206,17 @@ async def on_message(message: discord.Message):
 
     text = message.content.strip()
 
-    # 許可URLのみのメッセージは長文・複数人スパム検知をスキップ
+    # URLが含まれるメッセージは長文・改行・連続スパム検知をスキップ
     import re as _re
     _urls = _re.findall(r'https?://([^\s/]+)', text)
+    _has_any_url = bool(_urls) or bool(_re.search(r'discord\.gg/[^\s]+|discord\.com/invite/[^\s]+', text, _re.IGNORECASE))
     _is_allowed_url_only = bool(_urls) and all(
         any(d.lower().replace("www.", "") == a or d.lower().replace("www.", "").endswith("." + a) for a in ALLOWED_DOMAINS)
         for d in _urls
     )
 
-    # 添付ファイルのみはスキップ
-    if text and not _is_allowed_url_only:
+    # 添付ファイルのみはスキップ / URLを含む場合も長文・改行チェックをスキップ
+    if text and not _is_allowed_url_only and not _has_any_url:
         # 長文チェック
         stripped = text.replace(" ", "").replace("\n", "").replace("\u3000", "")
         if len(stripped) > MAX_MESSAGE_LENGTH or len(text) > MAX_MESSAGE_LENGTH:
@@ -315,6 +316,7 @@ async def on_message(message: discord.Message):
             await message.delete()
         except Exception:
             pass
+        await punish_automod(message.author, message.guild, message.channel, "不正URL送信", f"不正なURLを送信しました: `{blocked_domain}`")
         await log_action(message.guild, "🔗 不正URLブロック", message.author, f"URL: `{blocked_domain}`")
         return
 
