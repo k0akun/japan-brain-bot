@@ -518,55 +518,52 @@ async def badword_list(interaction: discord.Interaction):
 # ===== セットアップコマンド =====
 # ===========================
 
-@bot.tree.command(name="setup-ticket-category", description="チケットを作るカテゴリを設定します（管理者のみ）")
-@app_commands.describe(category="チケット用カテゴリ")
+@bot.tree.command(name="setup", description="ボットの設定を一括で行います（管理者のみ）")
+@app_commands.describe(
+    ticket_category="チケット用カテゴリ",
+    auth_category="認証チケット用カテゴリ",
+    ticket_log="チケットログチャンネル",
+    mod_log="モデレーションログチャンネル"
+)
 @app_commands.checks.has_permissions(administrator=True)
-async def setup_ticket_category(interaction: discord.Interaction, category: discord.CategoryChannel):
-    config["ticket_category_id"] = category.id
-    save_config(config)
-    await interaction.response.send_message(f"✅ チケットカテゴリを **{category.name}** に設定しました！", ephemeral=True)
+async def setup(
+    interaction: discord.Interaction,
+    ticket_category: discord.CategoryChannel = None,
+    auth_category: discord.CategoryChannel = None,
+    ticket_log: discord.TextChannel = None,
+    mod_log: discord.TextChannel = None
+):
+    if not any([ticket_category, auth_category, ticket_log, mod_log]):
+        # 何も指定されていなければ現在の設定を表示
+        guild = interaction.guild
+        cat = guild.get_channel(config.get("ticket_category_id")) if config.get("ticket_category_id") else None
+        auth_cat = guild.get_channel(config.get("auth_category_id")) if config.get("auth_category_id") else None
+        log_ch = guild.get_channel(config.get("log_channel_id")) if config.get("log_channel_id") else None
+        mod_ch = guild.get_channel(config.get("mod_log_channel_id")) if config.get("mod_log_channel_id") else None
+        embed = discord.Embed(title="⚙️ 現在の設定", color=discord.Color.blurple())
+        embed.add_field(name="🎫 チケットカテゴリ", value=cat.name if cat else "❌ 未設定", inline=False)
+        embed.add_field(name="🔑 認証チケットカテゴリ", value=auth_cat.name if auth_cat else "❌ 未設定", inline=False)
+        embed.add_field(name="📋 チケットログ", value=log_ch.mention if log_ch else "❌ 未設定", inline=False)
+        embed.add_field(name="🔨 モデレーションログ", value=mod_ch.mention if mod_ch else "⚠️ 未設定（チケットログと共用）", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
 
-@bot.tree.command(name="setup-auth-category", description="認証リクエスト用カテゴリを設定します（管理者のみ）")
-@app_commands.describe(category="認証チケット用カテゴリ")
-@app_commands.checks.has_permissions(administrator=True)
-async def setup_auth_category(interaction: discord.Interaction, category: discord.CategoryChannel):
-    config["auth_category_id"] = category.id
-    save_config(config)
-    await interaction.response.send_message(f"✅ 認証チケットカテゴリを **{category.name}** に設定しました！", ephemeral=True)
+    changed = []
+    if ticket_category:
+        config["ticket_category_id"] = ticket_category.id
+        changed.append(f"🎫 チケットカテゴリ → **{ticket_category.name}**")
+    if auth_category:
+        config["auth_category_id"] = auth_category.id
+        changed.append(f"🔑 認証カテゴリ → **{auth_category.name}**")
+    if ticket_log:
+        config["log_channel_id"] = ticket_log.id
+        changed.append(f"📋 チケットログ → {ticket_log.mention}")
+    if mod_log:
+        config["mod_log_channel_id"] = mod_log.id
+        changed.append(f"🔨 モデレーションログ → {mod_log.mention}")
 
-@bot.tree.command(name="setup-log-channel", description="チケットログを送るチャンネルを設定します（管理者のみ）")
-@app_commands.describe(channel="チケットログチャンネル")
-@app_commands.checks.has_permissions(administrator=True)
-async def setup_log_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    config["log_channel_id"] = channel.id
     save_config(config)
-    await interaction.response.send_message(f"✅ チケットログチャンネルを {channel.mention} に設定しました！", ephemeral=True)
-
-@bot.tree.command(name="setup-mod-log-channel", description="警告・BAN・キックなどのログチャンネルを設定します（管理者のみ）")
-@app_commands.describe(channel="モデレーションログチャンネル")
-@app_commands.checks.has_permissions(administrator=True)
-async def setup_mod_log_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    config["mod_log_channel_id"] = channel.id
-    save_config(config)
-    await interaction.response.send_message(f"✅ モデレーションログチャンネルを {channel.mention} に設定しました！", ephemeral=True)
-
-@bot.tree.command(name="setup-check", description="現在の設定を確認します（管理者のみ）")
-@app_commands.checks.has_permissions(administrator=True)
-async def setup_check(interaction: discord.Interaction):
-    guild = interaction.guild
-    cat_id = get_ticket_category_id()
-    log_id = get_log_channel_id()
-    mod_log_id = config.get("mod_log_channel_id")
-    category = guild.get_channel(cat_id) if cat_id else None
-    log_ch = guild.get_channel(log_id) if log_id else None
-    mod_log_ch = guild.get_channel(mod_log_id) if mod_log_id else None
-    embed = discord.Embed(title="⚙️ 現在の設定", color=discord.Color.blurple())
-    auth_cat_id = config.get("auth_category_id")
-    auth_cat = guild.get_channel(auth_cat_id) if auth_cat_id else None
-    embed.add_field(name="🎫 チケットカテゴリ", value=category.name if category else "❌ 未設定", inline=False)
-    embed.add_field(name="🔑 認証チケットカテゴリ", value=auth_cat.name if auth_cat else "❌ 未設定", inline=False)
-    embed.add_field(name="📋 チケットログチャンネル", value=log_ch.mention if log_ch else "❌ 未設定", inline=False)
-    embed.add_field(name="🔨 モデレーションログチャンネル", value=mod_log_ch.mention if mod_log_ch else f"⚠️ 未設定（チケットログと共用）", inline=False)
+    embed = discord.Embed(title="✅ 設定を更新しました", description="\n".join(changed), color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -668,7 +665,10 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str, labe
         overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
     channel = await guild.create_text_channel(name=f"{ticket_type}-{member.name.lower()}", category=category, overwrites=overwrites, topic=f"{label} | {member} ({member.id})")
-    mention_text = f"{member.mention} {admin_role.mention}" if admin_role else member.mention
+    if auth:
+        mention_text = member.mention  # 認証チケットはスタッフメンションなし
+    else:
+        mention_text = f"{member.mention} {admin_role.mention}" if admin_role else member.mention
     if auth:
         desc = (
             f"{member.mention} 認証リクエストを受け付けました。\n\n"
@@ -718,8 +718,8 @@ async def send_panel(interaction: discord.Interaction):
 # ===== 認証チケット自動削除 =====
 # ===========================
 
-TICKET_TIMEOUT_MINUTES = 10   # 通常チケット: 何分応答がなければ削除するか
-AUTH_TICKET_TIMEOUT_HOURS = 0.167  # 認証チケット: 10分（=10/60時間）
+TICKET_TIMEOUT_MINUTES = 5   # 通常チケット: 5分
+AUTH_TICKET_TIMEOUT_HOURS = 0.083  # 認証チケット: 5分（=5/60時間）
 
 @bot.event
 async def on_ready():
@@ -750,14 +750,14 @@ async def check_auth_tickets():
                 for channel in list(category.text_channels):
                     if not channel.name.startswith("auth-request-"):
                         continue
-                    await _auto_delete_ticket(guild, channel, minutes=10)
+                    await _auto_delete_ticket(guild, channel, minutes=5)
 
-        # 通常チケット（10分）
+        # 通常チケット（5分）
         if ticket_cat_id:
             category = guild.get_channel(ticket_cat_id)
             if category:
                 for channel in list(category.text_channels):
-                    await _auto_delete_ticket(guild, channel, minutes=10)
+                    await _auto_delete_ticket(guild, channel, minutes=5)
 
 
 async def _auto_delete_ticket(guild, channel, minutes: int):
