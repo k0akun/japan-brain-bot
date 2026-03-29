@@ -1137,4 +1137,20 @@ async def create_backup(guild: discord.Guild) -> dict:
     return backup
 
 
+@tasks.loop(hours=24)
+async def auto_backup():
+    """24時間ごとに自動バックアップ"""
+    for guild in bot.guilds:
+        data = await create_backup(guild)
+        save_backup(data)
+        log_ch = guild.get_channel(get_mod_log_channel_id())
+        if log_ch:
+            embed = discord.Embed(
+                title="💾 自動バックアップ完了",
+                description=f"サーバー: **{guild.name}**\nロール・チャンネル構成を保存しました。",
+                color=discord.Color.green(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            await log_ch.send(embed=embed)
+
 bot.run(TOKEN)
