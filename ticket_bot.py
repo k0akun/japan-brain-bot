@@ -39,6 +39,7 @@ def load_config():
             return json.load(f)
     return {
         "ticket_category_id": None,
+        "auth_category_id": None,
         "log_channel_id": None,
         "mod_log_channel_id": None,
     }
@@ -51,6 +52,9 @@ config = load_config()
 
 def get_ticket_category_id():
     return config.get("ticket_category_id")
+
+def get_auth_category_id():
+    return config.get("auth_category_id")
 
 def get_log_channel_id():
     return config.get("log_channel_id")
@@ -149,8 +153,16 @@ async def on_message(message: discord.Message):
 
     text = message.content.strip()
 
+    # 許可URLのみのメッセージは長文・複数人スパム検知をスキップ
+    import re as _re
+    _urls = _re.findall(r'https?://([^\s/]+)', text)
+    _is_allowed_url_only = bool(_urls) and all(
+        any(d.lower().replace("www.", "") == a or d.lower().replace("www.", "").endswith("." + a) for a in ALLOWED_DOMAINS)
+        for d in _urls
+    )
+
     # 添付ファイルのみはスキップ
-    if text:
+    if text and not _is_allowed_url_only:
         # 長文チェック
         stripped = text.replace(" ", "").replace("\n", "").replace("\u3000", "")
         if len(stripped) > MAX_MESSAGE_LENGTH or len(text) > MAX_MESSAGE_LENGTH:
@@ -512,6 +524,14 @@ async def setup_ticket_category(interaction: discord.Interaction, category: disc
     save_config(config)
     await interaction.response.send_message(f"✅ チケットカテゴリを **{category.name}** に設定しました！", ephemeral=True)
 
+@bot.tree.command(name="setup-auth-category", description="認証リクエスト用カテゴリを設定します（管理者のみ）")
+@app_commands.describe(category="認証チケット用カテゴリ")
+@app_commands.checks.has_permissions(administrator=True)
+async def setup_auth_category(interaction: discord.Interaction, category: discord.CategoryChannel):
+    config["auth_category_id"] = category.id
+    save_config(config)
+    await interaction.response.send_message(f"✅ 認証チケットカテゴリを **{category.name}** に設定しました！", ephemeral=True)
+
 @bot.tree.command(name="setup-log-channel", description="チケットログを送るチャンネルを設定します（管理者のみ）")
 @app_commands.describe(channel="チケットログチャンネル")
 @app_commands.checks.has_permissions(administrator=True)
@@ -539,7 +559,10 @@ async def setup_check(interaction: discord.Interaction):
     log_ch = guild.get_channel(log_id) if log_id else None
     mod_log_ch = guild.get_channel(mod_log_id) if mod_log_id else None
     embed = discord.Embed(title="⚙️ 現在の設定", color=discord.Color.blurple())
+    auth_cat_id = config.get("auth_category_id")
+    auth_cat = guild.get_channel(auth_cat_id) if auth_cat_id else None
     embed.add_field(name="🎫 チケットカテゴリ", value=category.name if category else "❌ 未設定", inline=False)
+    embed.add_field(name="🔑 認証チケットカテゴリ", value=auth_cat.name if auth_cat else "❌ 未設定", inline=False)
     embed.add_field(name="📋 チケットログチャンネル", value=log_ch.mention if log_ch else "❌ 未設定", inline=False)
     embed.add_field(name="🔨 モデレーションログチャンネル", value=mod_log_ch.mention if mod_log_ch else f"⚠️ 未設定（チケットログと共用）", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -564,6 +587,15 @@ class TicketPanelView(discord.ui.View):
     @discord.ui.button(label="📩 その他・お問い合わせ", style=discord.ButtonStyle.secondary, custom_id="ticket_other")
     async def ticket_other(self, interaction: discord.Interaction, button: discord.ui.Button):
         await create_ticket(interaction, "inquiry", "その他・お問い合わせ")
+
+
+class AuthPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🔑 認証リクエスト", style=discord.ButtonStyle.primary, custom_id="ticket_auth")
+    async def ticket_auth(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await create_ticket(interaction, "auth-request", "認証リクエスト", auth=True)
 
 
 class TicketView(discord.ui.View):
@@ -603,17 +635,25 @@ class TicketView(discord.ui.View):
         await channel.delete(reason=f"チケットクローズ by {interaction.user}")
 
 
-async def create_ticket(interaction: discord.Interaction, ticket_type: str, label: str):
+async def create_ticket(interaction: discord.Interaction, ticket_type: str, label: str, auth: bool = False):
     guild = interaction.guild
     member = interaction.user
-    category = guild.get_channel(get_ticket_category_id())
-
-    if category is None:
-        await interaction.response.send_message(
-            "❌ チケット用カテゴリが未設定です。管理者が `/setup-ticket-category` で設定してください。",
-            ephemeral=True
-        )
-        return
+    if auth:
+        category = guild.get_channel(get_auth_category_id())
+        if category is None:
+            await interaction.response.send_message(
+                "❌ 認証チケット用カテゴリが未設定です。管理者が `/setup-auth-category` で設定してください。",
+                ephemeral=True
+            )
+            return
+    else:
+        category = guild.get_channel(get_ticket_category_id())
+        if category is None:
+            await interaction.response.send_message(
+                "❌ チケット用カテゴリが未設定です。管理者が `/setup-ticket-category` で設定してください。",
+                ephemeral=True
+            )
+            return
 
     existing = discord.utils.get(category.channels, name=f"{ticket_type}-{member.name.lower()}")
     if existing:
@@ -631,10 +671,37 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str, labe
 
     channel = await guild.create_text_channel(name=f"{ticket_type}-{member.name.lower()}", category=category, overwrites=overwrites, topic=f"{label} | {member} ({member.id})")
     mention_text = f"{member.mention} {admin_role.mention}" if admin_role else member.mention
-    embed = discord.Embed(title=f"🎫 {label}", description=f"{member.mention} さん、チケットを作成しました！\n\n**内容を詳しく教えてください。**\nスタッフが確認次第、対応いたします。\n\nチケットを閉じる場合は下のボタンを押してください（管理者のみ）。", color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
+    if auth:
+        desc = (
+            f"{member.mention} 認証リクエストを受け付けました。\n\n"
+            f"⚠️ このチケットは管理者が管理しているためロールが着くまで遅くなる可能性があります。\n\n"
+            f"チケットを閉じる場合は下のボタンを押してください（管理者のみ）。"
+        )
+    else:
+        desc = (
+            f"{member.mention} さん、チケットを作成しました！\n\n"
+            f"**内容を詳しく教えてください。**\nスタッフが確認次第、対応いたします。\n\n"
+            f"チケットを閉じる場合は下のボタンを押してください（管理者のみ）。"
+        )
+    embed = discord.Embed(title=f"🎫 {label}", description=desc, color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
     embed.set_footer(text=f"チケットID: {channel.id}")
     await channel.send(content=mention_text, embed=embed, view=TicketView())
     await interaction.response.send_message(f"✅ チケットを作成しました: {channel.mention}", ephemeral=True)
+
+
+@bot.tree.command(name="auth-panel", description="認証リクエストパネルを送信します（管理者のみ）")
+@app_commands.checks.has_permissions(administrator=True)
+async def send_auth_panel(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🔑 認証リクエスト",
+        description=(
+            "認証ができない方はボタンを押してリクエストを送ってください。\n\n"
+            "🔑 **認証リクエスト** — 認証ができない方向けのサポート"
+        ),
+        color=discord.Color.gold()
+    )
+    await interaction.channel.send(embed=embed, view=AuthPanelView())
+    await interaction.response.send_message("✅ 認証リクエストパネルを送信しました。", ephemeral=True)
 
 
 @bot.tree.command(name="ticket-panel", description="チケットパネルを送信します（管理者のみ）")
@@ -652,6 +719,7 @@ async def send_panel(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     bot.add_view(TicketPanelView())
+    bot.add_view(AuthPanelView())
     bot.add_view(TicketView())
     try:
         synced = await bot.tree.sync()
@@ -660,7 +728,5 @@ async def on_ready():
         print(f"❌ 同期エラー: {e}")
     print(f"✅ {bot.user} としてログインしました")
 
-
-bot.run(TOKEN)
 
 bot.run(TOKEN)
