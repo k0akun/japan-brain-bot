@@ -11,6 +11,8 @@ from collections import defaultdict
 from difflib import SequenceMatcher
 import re
 import time
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # ===== 設定 =====
 TOKEN = os.environ.get("TOKEN")
@@ -42,6 +44,7 @@ def load_config():
     return {
         "ticket_category_id": None,
         "auth_category_id": None,
+        "inquiry_category_id": None,
         "log_channel_id": None,
         "mod_log_channel_id": None,
     }
@@ -57,6 +60,9 @@ def get_ticket_category_id():
 
 def get_auth_category_id():
     return config.get("auth_category_id")
+
+def get_inquiry_category_id():
+    return config.get("inquiry_category_id")
 
 def get_log_channel_id():
     return config.get("log_channel_id")
@@ -93,6 +99,52 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ===== Supabase (PostgreSQL) =====
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def get_db():
+    return psycopg2.connect(DATABASE_URL)
+
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS warns (
+            user_id BIGINT PRIMARY KEY,
+            count INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def get_warns(user_id: int) -> int:
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT count FROM warns WHERE user_id = %s", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+def set_warns(user_id: int, count: int):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO warns (user_id, count) VALUES (%s, %s)
+        ON CONFLICT (user_id) DO UPDATE SET count = EXCLUDED.count
+    """, (user_id, count))
+    conn.commit()
+    conn.close()
+
+def add_warn(user_id: int) -> int:
+    count = get_warns(user_id) + 1
+    set_warns(user_id, count)
+    return count
+
+def remove_warns(user_id: int, amount: int) -> int:
+    count = max(0, get_warns(user_id) - amount)
+    set_warns(user_id, count)
+    return count
+
 # スパム検知用メモリ
 spam_tracker = defaultdict(list)
 # 追加AutoMod用キャッシュ
@@ -102,20 +154,7 @@ content_spam_cache = []  # [(user_id, text, timestamp)]
 # レイド検知用メモリ
 join_tracker = []
 
-# 警告数をJSONで永続化
-WARN_FILE = "warns.json"
-
-def load_warns():
-    if os.path.exists(WARN_FILE):
-        with open(WARN_FILE, "r", encoding="utf-8") as f:
-            return {int(k): v for k, v in json.load(f).items()}
-    return {}
-
-def save_warns():
-    with open(WARN_FILE, "w", encoding="utf-8") as f:
-        json.dump(warn_tracker, f, ensure_ascii=False, indent=2)
-
-warn_tracker = load_warns()
+# 警告数はSupabaseで管理
 
 
 # ===========================
@@ -721,11 +760,20 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str, labe
                 ephemeral=True
             )
             return
+    elif ticket_type == "inquiry":
+        cat_id = get_inquiry_category_id() or get_ticket_category_id()
+        category = guild.get_channel(cat_id)
+        if category is None:
+            await interaction.response.send_message(
+                "❌ お問い合わせチケット用カテゴリが未設定です。管理者が `/setup-inquiry-category` で設定してください。",
+                ephemeral=True
+            )
+            return
     else:
         category = guild.get_channel(get_ticket_category_id())
         if category is None:
             await interaction.response.send_message(
-                "❌ チケット用カテゴリが未設定です。管理者が `/setup-ticket-category` で設定してください。",
+                "❌ チケット用カテゴリが未設定です。管理者が `/setup-support-category` で設定してください。",
                 ephemeral=True
             )
             return
@@ -1009,6 +1057,7 @@ AUTH_TICKET_TIMEOUT_HOURS = 0.083  # 認証チケット: 5分（=5/60時間）
 
 @bot.event
 async def on_ready():
+    init_db()
     check_auth_tickets.start()
     auto_backup.start()
     bot.add_view(TicketPanelView())
