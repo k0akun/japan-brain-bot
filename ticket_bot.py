@@ -778,19 +778,6 @@ async def botstatus(interaction: discord.Interaction):
     auth_cat = guild.get_channel(auth_cat_id) if auth_cat_id else None
     log_ch = guild.get_channel(log_id) if log_id else None
     mod_log_ch = guild.get_channel(mod_log_id) if mod_log_id else None
-
-
-@bot.tree.command(name="botstatus", description="Botの現在の設定を全員に表示します")
-async def botstatus(interaction: discord.Interaction):
-    guild = interaction.guild
-    cat_id = config.get("ticket_category_id")
-    auth_cat_id = config.get("auth_category_id")
-    log_id = config.get("log_channel_id")
-    mod_log_id = config.get("mod_log_channel_id")
-    category = guild.get_channel(cat_id) if cat_id else None
-    auth_cat = guild.get_channel(auth_cat_id) if auth_cat_id else None
-    log_ch = guild.get_channel(log_id) if log_id else None
-    mod_log_ch = guild.get_channel(mod_log_id) if mod_log_id else None
     embed = discord.Embed(title="\U0001f916 Bot設定状況", color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc))
     embed.add_field(name="\U0001f3ab チケットカテゴリ", value=category.name if category else "\u274c 未設定", inline=True)
     embed.add_field(name="\U0001f511 認証チケットカテゴリ", value=auth_cat.name if auth_cat else "\u274c 未設定", inline=True)
