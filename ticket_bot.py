@@ -102,8 +102,20 @@ content_spam_cache = []  # [(user_id, text, timestamp)]
 # レイド検知用メモリ
 join_tracker = []
 
-# 警告数メモリ
-warn_tracker = defaultdict(int)
+# 警告数をJSONで永続化
+WARN_FILE = "warns.json"
+
+def load_warns():
+    if os.path.exists(WARN_FILE):
+        with open(WARN_FILE, "r", encoding="utf-8") as f:
+            return {int(k): v for k, v in json.load(f).items()}
+    return {}
+
+def save_warns():
+    with open(WARN_FILE, "w", encoding="utf-8") as f:
+        json.dump(warn_tracker, f, ensure_ascii=False, indent=2)
+
+warn_tracker = load_warns()
 
 
 # ===========================
@@ -234,26 +246,46 @@ async def on_message(message: discord.Message):
             await log_action(message.guild, "🚨 複数アカウントスパム検知", message.author, f"対象ID: {guilty_ids}")
             return
 
-    # URLフィルター
+    # URLフィルター（http/https + discord.gg + 埋め込みリンク）
     url_pattern = re.compile(r'https?://([^\s/]+)')
+    invite_pattern = re.compile(r'discord\.gg/[^\s]+|discord\.com/invite/[^\s]+', re.IGNORECASE)
+    markdown_url_pattern = re.compile(r'\[.+?\]\(https?://([^\s/\)]+)')
+
     urls = url_pattern.findall(message.content)
-    for domain in urls:
+    markdown_urls = markdown_url_pattern.findall(message.content)
+    has_invite = bool(invite_pattern.search(message.content))
+
+    blocked = False
+    blocked_domain = ""
+
+    # 通常URL
+    for domain in urls + markdown_urls:
         domain = domain.lower().replace("www.", "")
         if not any(domain == a or domain.endswith("." + a) for a in ALLOWED_DOMAINS):
+            blocked = True
+            blocked_domain = domain
+            break
+
+    # Discord招待リンク
+    if has_invite:
+        blocked = True
+        blocked_domain = "discord.gg"
+
+    if blocked:
+        try:
             await message.delete()
-            await message.channel.send(
-                f"🔗 {message.author.mention} このリンクは許可されていません。",
-                delete_after=5
-            )
-            await log_action(message.guild, "🔗 不正URLブロック", message.author, f"URL: `{domain}`")
-            return
+        except Exception:
+            pass
+        await log_action(message.guild, "🔗 不正URLブロック", message.author, f"URL: `{blocked_domain}`")
+        return
 
     # 悪言フィルター
     for word in BAD_WORDS:
         if word in message.content:
             await message.delete()
-            warn_tracker[message.author.id] += 1
+            warn_tracker[message.author.id] = warn_tracker.get(message.author.id, 0) + 1
             count = warn_tracker[message.author.id]
+            save_warns()
             await message.channel.send(
                 f"⚠️ {message.author.mention} 禁止ワードが含まれています。(警告 {count}回目)",
                 delete_after=5
@@ -270,8 +302,9 @@ async def on_message(message: discord.Message):
 
     if len(spam_tracker[user_id]) >= SPAM_LIMIT:
         spam_tracker[user_id] = []
-        warn_tracker[user_id] += 1
+        warn_tracker[user_id] = warn_tracker.get(user_id, 0) + 1
         count = warn_tracker[user_id]
+        save_warns()
         await message.channel.send(
             f"⚠️ {message.author.mention} スパムを検知しました。(警告 {count}回目)",
             delete_after=5
@@ -335,8 +368,9 @@ async def on_member_join(member: discord.Member):
 @app_commands.describe(member="警告するユーザー", reason="理由")
 @app_commands.checks.has_permissions(administrator=True)
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "理由なし"):
-    warn_tracker[member.id] += 1
+    warn_tracker[member.id] = warn_tracker.get(member.id, 0) + 1
     count = warn_tracker[member.id]
+    save_warns()
     await interaction.response.send_message(f"⚠️ {member.mention} に警告を出しました。({count}回目)\n理由: {reason}")
     await log_action(interaction.guild, "⚠️ 警告", member, f"理由: {reason} | 合計{count}回")
     await auto_punish(member, interaction.guild, count)
@@ -346,7 +380,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 @app_commands.describe(member="確認するユーザー")
 @app_commands.checks.has_permissions(administrator=True)
 async def warns(interaction: discord.Interaction, member: discord.Member):
-    count = warn_tracker[member.id]
+    count = warn_tracker.get(member.id, 0)
     await interaction.response.send_message(f"📋 {member.mention} の警告数: **{count}回**", ephemeral=True)
 
 
@@ -355,6 +389,7 @@ async def warns(interaction: discord.Interaction, member: discord.Member):
 @app_commands.checks.has_permissions(administrator=True)
 async def clearwarn(interaction: discord.Interaction, member: discord.Member):
     warn_tracker[member.id] = 0
+    save_warns()
     await interaction.response.send_message(f"✅ {member.mention} の警告をリセットしました。", ephemeral=True)
     await log_action(interaction.guild, "🔄 警告リセット", member, f"実行者: {interaction.user}")
 
