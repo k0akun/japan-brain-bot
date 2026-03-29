@@ -932,6 +932,14 @@ async def check_auth_tickets():
                 for channel in list(category.text_channels):
                     if not channel.name.startswith("auth-request-"):
                         continue
+                    # 人間のメッセージがあれば削除しない
+                    has_human_msg = False
+                    async for msg in channel.history(limit=50):
+                        if not msg.author.bot:
+                            has_human_msg = True
+                            break
+                    if has_human_msg:
+                        continue
                     await _auto_delete_ticket(guild, channel, minutes=5)
 
         # 通常チケット（5分）
