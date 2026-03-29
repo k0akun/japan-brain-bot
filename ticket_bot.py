@@ -324,6 +324,51 @@ async def auto_punish(member: discord.Member, guild: discord.Guild, count: int):
 
 
 # ===========================
+# ===== メッセージ編集検知 =====
+# ===========================
+
+@bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    if after.author.bot:
+        return
+    if not after.guild:
+        return
+
+    staff_role = after.guild.get_role(ADMIN_ROLE_ID)
+    if staff_role in after.author.roles or after.author.guild_permissions.administrator:
+        return
+
+    text = after.content.strip()
+    url_pattern = re.compile(r'https?://([^\s/]+)')
+    invite_pattern = re.compile(r'discord\.gg/[^\s]+|discord\.com/invite/[^\s]+', re.IGNORECASE)
+    markdown_url_pattern = re.compile(r'\[.+?\]\(https?://([^\s/\)]+)')
+
+    urls = url_pattern.findall(text)
+    markdown_urls = markdown_url_pattern.findall(text)
+    has_invite = bool(invite_pattern.search(text))
+
+    blocked = False
+    blocked_domain = ""
+
+    for domain in urls + markdown_urls:
+        domain = domain.lower().replace("www.", "")
+        if not any(domain == a or domain.endswith("." + a) for a in ALLOWED_DOMAINS):
+            blocked = True
+            blocked_domain = domain
+            break
+
+    if has_invite:
+        blocked = True
+        blocked_domain = "discord.gg"
+
+    if blocked:
+        try:
+            await after.delete()
+        except Exception:
+            pass
+        await log_action(after.guild, "🔗 編集による不正URLブロック", after.author, f"URL: `{blocked_domain}`")
+
+# ===========================
 # ===== レイド検知 =====
 # ===========================
 
