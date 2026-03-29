@@ -322,9 +322,7 @@ async def on_message(message: discord.Message):
     for word in BAD_WORDS:
         if word in message.content:
             await message.delete()
-            warn_tracker[message.author.id] = warn_tracker.get(message.author.id, 0) + 1
-            count = warn_tracker[message.author.id]
-            save_warns()
+            count = add_warn(message.author.id)
             await message.channel.send(
                 f"⚠️ {message.author.mention} 禁止ワードが含まれています。(警告 {count}回目)",
                 delete_after=5
@@ -341,9 +339,7 @@ async def on_message(message: discord.Message):
 
     if len(spam_tracker[user_id]) >= SPAM_LIMIT:
         spam_tracker[user_id] = []
-        warn_tracker[user_id] = warn_tracker.get(user_id, 0) + 1
-        count = warn_tracker[user_id]
-        save_warns()
+        count = add_warn(user_id)
         await message.channel.send(
             f"⚠️ {message.author.mention} スパムを検知しました。(警告 {count}回目)",
             delete_after=5
@@ -452,9 +448,7 @@ async def on_member_join(member: discord.Member):
 @app_commands.describe(member="警告するユーザー", reason="理由")
 @app_commands.checks.has_permissions(administrator=True)
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "理由なし"):
-    warn_tracker[member.id] = warn_tracker.get(member.id, 0) + 1
-    count = warn_tracker[member.id]
-    save_warns()
+    count = add_warn(member.id)
     await interaction.response.send_message(f"⚠️ {member.mention} に警告を出しました。({count}回目)\n理由: {reason}")
     await log_action(interaction.guild, "⚠️ 警告", member, f"理由: {reason} | 合計{count}回")
     await auto_punish(member, interaction.guild, count)
@@ -464,18 +458,17 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 @app_commands.describe(member="確認するユーザー")
 @app_commands.checks.has_permissions(administrator=True)
 async def warns(interaction: discord.Interaction, member: discord.Member):
-    count = warn_tracker.get(member.id, 0)
+    count = get_warns(member.id)
     await interaction.response.send_message(f"📋 {member.mention} の警告数: **{count}回**", ephemeral=True)
 
 
-@bot.tree.command(name="clearwarn", description="ユーザーの警告をリセットします（スタッフのみ）")
-@app_commands.describe(member="リセットするユーザー")
+@bot.tree.command(name="clearwarn", description="ユーザーの警告を指定した数だけ減らします（スタッフのみ）")
+@app_commands.describe(member="対象ユーザー", amount="減らす警告数（省略すると1）")
 @app_commands.checks.has_permissions(administrator=True)
-async def clearwarn(interaction: discord.Interaction, member: discord.Member):
-    warn_tracker[member.id] = 0
-    save_warns()
-    await interaction.response.send_message(f"✅ {member.mention} の警告をリセットしました。", ephemeral=True)
-    await log_action(interaction.guild, "🔄 警告リセット", member, f"実行者: {interaction.user}")
+async def clearwarn(interaction: discord.Interaction, member: discord.Member, amount: int = 1):
+    new_count = remove_warns(member.id, amount)
+    await interaction.response.send_message(f"✅ {member.mention} の警告を{amount}個減らしました。（現在: {new_count}回）", ephemeral=True)
+    await log_action(interaction.guild, "🔄 警告減少", member, f"{amount}個減らしました | 残り{new_count}回 | 実行者: {interaction.user}")
 
 
 @bot.tree.command(name="kick", description="ユーザーをキックします（スタッフのみ）")
@@ -864,7 +857,6 @@ async def send_panel(interaction: discord.Interaction):
 
 
 # ===========================
-# ===========================
 # ===== バックアップ・復元 =====
 # ===========================
 
@@ -1045,9 +1037,6 @@ async def restore(interaction: discord.Interaction, file: discord.Attachment):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-# ===== Bot起動時 =====
-# ===========================
-
 # ===========================
 # ===== 認証チケット自動削除 =====
 # ===========================
@@ -1073,13 +1062,13 @@ async def on_ready():
 
 @tasks.loop(minutes=2)
 async def check_auth_tickets():
-    """チケットを10分応答がなければ自動削除"""
+    """チケットを5分応答がなければ自動削除"""
     from datetime import timedelta, timezone as tz
     auth_cat_id = config.get("auth_category_id")
     ticket_cat_id = config.get("ticket_category_id")
 
     for guild in bot.guilds:
-        # 認証チケット（10分）
+        # 認証チケット（5分）
         if auth_cat_id:
             category = guild.get_channel(auth_cat_id)
             if category:
