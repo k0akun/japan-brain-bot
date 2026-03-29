@@ -78,7 +78,7 @@ def load_bad_words():
     if os.path.exists(BAD_WORDS_FILE):
         with open(BAD_WORDS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return ["死ね", "殺す", "アホ", "シコシコ", "クンニ", "障害者", "しこしこ", "うんち", "うんこ", "だまれ", "sex"]
+    return ["死ね", "殺す", "アホ", "シコシコ", "クンニ", "障害者", "しこしこ", "うんち", "うんこ", "だまれ", "sex","@everyone"," @here","ガイジ","がいじ","カス","かす","きえろ","クズ","くず","消えろ","障害","片親","死んどけ","人殺し","ガイキチ","きちがい","キチガイ","イク","ゲイ","バイ","そちん","ちんぽ","まんこ","ちんこ","ちんちん","テンガ","TENGA","施設育ち"]
 
 def save_bad_words(words):
     with open(BAD_WORDS_FILE, "w", encoding="utf-8") as f:
