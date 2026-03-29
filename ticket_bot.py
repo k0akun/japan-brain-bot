@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import asyncio
 from datetime import datetime, timezone
@@ -70,7 +70,7 @@ def load_bad_words():
     if os.path.exists(BAD_WORDS_FILE):
         with open(BAD_WORDS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return ["死ね", "殺す", "クソ", "バカ", "アホ"]
+    return ["死ね", "殺す", "アホ", "シコシコ", "クンニ", "障害者", "しこしこ"]
 
 def save_bad_words(words):
     with open(BAD_WORDS_FILE, "w", encoding="utf-8") as f:
@@ -82,6 +82,8 @@ BAD_WORDS = load_bad_words()
 ALLOWED_DOMAINS = [
     "youtube.com",
     "youtu.be",
+    "tenor.com",
+    "cdn.discordapp.com",
 ]
 
 intents = discord.Intents.default()
@@ -716,8 +718,15 @@ async def send_panel(interaction: discord.Interaction):
 # ===== Bot起動時 =====
 # ===========================
 
+# ===========================
+# ===== 認証チケット自動削除 =====
+# ===========================
+
+AUTH_TICKET_TIMEOUT_HOURS = 5  # 何時間メッセージがなければ削除するか
+
 @bot.event
 async def on_ready():
+    check_auth_tickets.start()
     bot.add_view(TicketPanelView())
     bot.add_view(AuthPanelView())
     bot.add_view(TicketView())
@@ -728,5 +737,45 @@ async def on_ready():
         print(f"❌ 同期エラー: {e}")
     print(f"✅ {bot.user} としてログインしました")
 
+
+@tasks.loop(minutes=30)
+async def check_auth_tickets():
+    """認証チケットを5時間メッセージがなければ自動削除"""
+    from datetime import timedelta, timezone as tz
+    auth_cat_id = config.get("auth_category_id")
+    if not auth_cat_id:
+        return
+    for guild in bot.guilds:
+        category = guild.get_channel(auth_cat_id)
+        if not category:
+            continue
+        for channel in category.text_channels:
+            if not channel.name.startswith("auth-request-"):
+                continue
+            try:
+                # ボット以外のメッセージが1つでもあれば削除しない
+                human_msgs = []
+                async for msg in channel.history(limit=50):
+                    if not msg.author.bot:
+                        human_msgs.append(msg)
+                        break
+                if human_msgs:
+                    continue
+
+                # ボットのみのメッセージしかない場合、チャンネル作成から5時間で削除
+                now = datetime.now(tz.utc)
+                if (now - channel.created_at).total_seconds() > AUTH_TICKET_TIMEOUT_HOURS * 3600:
+                    log_channel = guild.get_channel(config.get("log_channel_id"))
+                    if log_channel:
+                        embed = discord.Embed(
+                            title="🗑️ 認証チケット自動削除",
+                            description=f"チャンネル: `{channel.name}`\n{AUTH_TICKET_TIMEOUT_HOURS}時間応答がなかったため自動削除しました。",
+                            color=discord.Color.red(),
+                            timestamp=datetime.now(tz.utc)
+                        )
+                        await log_channel.send(embed=embed)
+                    await channel.delete(reason=f"認証チケット: {AUTH_TICKET_TIMEOUT_HOURS}時間無応答のため自動削除")
+            except Exception:
+                pass
 
 bot.run(TOKEN)
