@@ -17,6 +17,7 @@ TOKEN = os.environ.get("TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://fdajbuwhxxmwunpxpkwf.supabase.co")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 ADMIN_ROLE_ID = 1486603522748317737
+SUB_ROLE_ID = 1479446163353632911  # 追加スタッフロール
 
 SPAM_LIMIT = 5
 SPAM_INTERVAL = 5
@@ -28,7 +29,7 @@ MAX_NEWLINES = 10
 TIMEOUT_MINUTES = 5
 SPAM_COUNT = 3
 CONTENT_SPAM_USERS = 4
-CONTENT_SPAM_SECONDS = 10
+CONTENT_SPAM_SECONDS = 5   # 複数アカウントスパム: 何秒以内
 CONTENT_SPAM_RATIO = 0.80
 CONTENT_SPAM_PREFIX = 8
 # ================
@@ -56,6 +57,24 @@ async def sb_delete(table: str, params: str):
     async with aiohttp.ClientSession() as s:
         async with s.delete(f"{SUPABASE_URL}/rest/v1/{table}?{params}", headers=sb_headers()) as r:
             return r.status
+
+# ===== スタッフ権限チェック =====
+def is_staff(interaction: discord.Interaction) -> bool:
+    """管理者権限 または スタッフロール（ADMIN_ROLE_ID / SUB_ROLE_ID）を持つか確認"""
+    member = interaction.user
+    if member.guild_permissions.administrator:
+        return True
+    role_ids = {r.id for r in member.roles}
+    return ADMIN_ROLE_ID in role_ids or SUB_ROLE_ID in role_ids
+
+def staff_check():
+    """app_commands用スタッフ権限チェックデコレータ"""
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if not is_staff(interaction):
+            await interaction.response.send_message("❌ このコマンドはスタッフのみ使用できます。", ephemeral=True)
+            return False
+        return True
+    return app_commands.check(predicate)
 
 # ===== 警告データ（Supabase） =====
 async def get_warns(user_id: int) -> int:
@@ -118,6 +137,19 @@ async def get_mod_log_channel_id():
 async def get_backup_channel_id():
     return await get_config("backup_channel_id")
 
+# ===== 長文スパム除外チャンネル（Supabase） =====
+async def get_spam_ignore_ids() -> list:
+    rows = await sb_get("spam_ignore", "select=channel_id")
+    if rows and len(rows) > 0:
+        return [r["channel_id"] for r in rows]
+    return []
+
+async def add_spam_ignore_id(channel_id: int):
+    await sb_upsert("spam_ignore", {"channel_id": channel_id})
+
+async def remove_spam_ignore_id(channel_id: int):
+    await sb_delete("spam_ignore", f"channel_id=eq.{channel_id}")
+
 # ===== 許可するURLドメイン =====
 ALLOWED_DOMAINS = [
     "youtube.com",
@@ -139,6 +171,8 @@ join_tracker = []
 
 # 禁止ワードはBot起動時にSupabaseから読み込む
 BAD_WORDS = []
+# 長文スパム除外チャンネル/スレッドIDはBot起動時に読み込む
+SPAM_IGNORE_IDS: set = set()
 
 
 # ===========================
@@ -190,6 +224,11 @@ async def on_message(message: discord.Message):
 
     text = message.content.strip()
 
+    # 長文スパム除外チャンネル/スレッドかチェック
+    _channel_id = message.channel.id
+    _thread_parent_id = getattr(message.channel, "parent_id", None)
+    _is_spam_ignored = _channel_id in SPAM_IGNORE_IDS or (_thread_parent_id and _thread_parent_id in SPAM_IGNORE_IDS)
+
     # 許可URLのみのメッセージは長文・複数人スパム検知をスキップ
     import re as _re
     _urls = _re.findall(r'https?://([^\s/]+)', text)
@@ -200,24 +239,25 @@ async def on_message(message: discord.Message):
 
     # 添付ファイルのみはスキップ
     if text and not _is_allowed_url_only:
-        # 長文チェック
-        stripped = text.replace(" ", "").replace("\n", "").replace("\u3000", "")
-        if len(stripped) > MAX_MESSAGE_LENGTH or len(text) > MAX_MESSAGE_LENGTH:
-            try:
-                await message.channel.purge(limit=10, check=lambda m: m.author.id == message.author.id, bulk=True)
-            except Exception:
-                pass
-            await punish_automod(message.author, message.guild, message.channel, "長文スパム検知", "長文スパムを検知しました。")
-            return
+        # 長文チェック（除外チャンネルはスキップ）
+        if not _is_spam_ignored:
+            stripped = text.replace(" ", "").replace("\n", "").replace("\u3000", "")
+            if len(stripped) > MAX_MESSAGE_LENGTH or len(text) > MAX_MESSAGE_LENGTH:
+                try:
+                    await message.channel.purge(limit=10, check=lambda m: m.author.id == message.author.id, bulk=True)
+                except Exception:
+                    pass
+                await punish_automod(message.author, message.guild, message.channel, "長文スパム検知", "長文スパムを検知しました。")
+                return
 
-        # 改行スパムチェック
-        if text.count("\n") >= MAX_NEWLINES:
-            try:
-                await message.channel.purge(limit=10, check=lambda m: m.author.id == message.author.id, bulk=True)
-            except Exception:
-                pass
-            await punish_automod(message.author, message.guild, message.channel, "改行スパム検知", "改行スパムを検知しました。")
-            return
+            # 改行スパムチェック
+            if text.count("\n") >= MAX_NEWLINES:
+                try:
+                    await message.channel.purge(limit=10, check=lambda m: m.author.id == message.author.id, bulk=True)
+                except Exception:
+                    pass
+                await punish_automod(message.author, message.guild, message.channel, "改行スパム検知", "改行スパムを検知しました。")
+                return
 
         # 連続同一メッセージチェック（6文字以上のみ）
         if len(text) >= 6:
@@ -386,7 +426,7 @@ async def on_member_join(member: discord.Member):
 
 @bot.tree.command(name="warn", description="ユーザーに警告を出します（スタッフのみ）")
 @app_commands.describe(member="警告するユーザー", reason="理由")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "理由なし"):
     count = await get_warns(member.id) + 1
     await set_warns(member.id, count)
@@ -396,13 +436,9 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 
 
 @bot.tree.command(name="warnlist", description="全員の警告数一覧を表示します（スタッフのみ）")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def warnlist(interaction: discord.Interaction):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT user_id, count FROM warns WHERE count > 0 ORDER BY count DESC")
-    rows = c.fetchall()
-    conn.close()
+    rows = await sb_get("warns", "count=gt.0&order=count.desc")
 
     if not rows:
         await interaction.response.send_message("📋 警告のあるユーザーはいません。", ephemeral=True)
@@ -415,8 +451,10 @@ async def warnlist(interaction: discord.Interaction):
     )
 
     lines = []
-    for user_id, count in rows:
-        member = interaction.guild.get_member(user_id)
+    for row in rows:
+        user_id = row["user_id"]
+        count = row["count"]
+        member = interaction.guild.get_member(int(user_id))
         name = member.mention if member else f"ID: {user_id}（退出済み）"
         lines.append(f"{name} → **{count}回**")
 
@@ -431,7 +469,7 @@ async def warnlist(interaction: discord.Interaction):
 
 @bot.tree.command(name="warns", description="ユーザーの警告数を確認します")
 @app_commands.describe(member="確認するユーザー")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def warns(interaction: discord.Interaction, member: discord.Member):
     count = await get_warns(member.id)
     await interaction.response.send_message(f"📋 {member.mention} の警告数: **{count}回**", ephemeral=True)
@@ -439,7 +477,7 @@ async def warns(interaction: discord.Interaction, member: discord.Member):
 
 @bot.tree.command(name="clearwarn", description="ユーザーの警告をリセットします（スタッフのみ）")
 @app_commands.describe(member="リセットするユーザー")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def clearwarn(interaction: discord.Interaction, member: discord.Member):
     await reset_warns(member.id)
     await interaction.response.send_message(f"✅ {member.mention} の警告をリセットしました。", ephemeral=True)
@@ -448,7 +486,7 @@ async def clearwarn(interaction: discord.Interaction, member: discord.Member):
 
 @bot.tree.command(name="kick", description="ユーザーをキックします（スタッフのみ）")
 @app_commands.describe(member="キックするユーザー", reason="理由")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "理由なし"):
     await member.kick(reason=reason)
     await interaction.response.send_message(f"👢 {member.mention} をキックしました。\n理由: {reason}")
@@ -457,7 +495,7 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
 
 @bot.tree.command(name="ban", description="ユーザーをBANします（スタッフのみ）")
 @app_commands.describe(member="BANするユーザー", reason="理由")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "理由なし"):
     await member.ban(reason=reason)
     await interaction.response.send_message(f"🔨 {member.mention} をBANしました。\n理由: {reason}")
@@ -466,7 +504,7 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
 
 @bot.tree.command(name="unban", description="ユーザーのBANを解除します（スタッフのみ）")
 @app_commands.describe(user_id="解除するユーザーのID")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def unban(interaction: discord.Interaction, user_id: str):
     try:
         user = await bot.fetch_user(int(user_id))
@@ -477,9 +515,40 @@ async def unban(interaction: discord.Interaction, user_id: str):
         await interaction.response.send_message("❌ ユーザーが見つからないか、BANされていません。", ephemeral=True)
 
 
+@bot.tree.command(name="banlist", description="BANされているユーザーの一覧を表示します（スタッフのみ）")
+@staff_check()
+async def banlist(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    bans = []
+    async for ban_entry in interaction.guild.bans():
+        bans.append(ban_entry)
+
+    if not bans:
+        await interaction.followup.send("📋 BANされているユーザーはいません。", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🔨 BAN一覧",
+        color=discord.Color.red(),
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text=f"合計: {len(bans)} 人")
+
+    lines = []
+    for entry in bans[:25]:
+        reason = entry.reason or "理由なし"
+        lines.append(f"**{entry.user}** (`{entry.user.id}`) - {reason}")
+
+    embed.description = "\n".join(lines)
+    if len(bans) > 25:
+        embed.add_field(name="⚠️", value=f"他 {len(bans) - 25} 人（最初の25人を表示）", inline=False)
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="timeout", description="ユーザーをタイムアウトします（スタッフのみ）")
 @app_commands.describe(member="対象ユーザー", minutes="タイムアウト時間（分）", reason="理由")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, minutes: int = 10, reason: str = "理由なし"):
     until = discord.utils.utcnow() + __import__("datetime").timedelta(minutes=minutes)
     await member.timeout(until, reason=reason)
@@ -519,7 +588,7 @@ async def log_ticket(guild: discord.Guild, embed: discord.Embed, file=None):
 
 @bot.tree.command(name="url-add", description="許可するURLドメインを追加します（スタッフのみ）")
 @app_commands.describe(domain="追加するドメイン（例: twitter.com）")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def url_add(interaction: discord.Interaction, domain: str):
     domain = domain.lower().replace("www.", "").strip()
     if domain in ALLOWED_DOMAINS:
@@ -532,7 +601,7 @@ async def url_add(interaction: discord.Interaction, domain: str):
 
 @bot.tree.command(name="url-remove", description="許可するURLドメインを削除します（スタッフのみ）")
 @app_commands.describe(domain="削除するドメイン（例: twitter.com）")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def url_remove(interaction: discord.Interaction, domain: str):
     domain = domain.lower().replace("www.", "").strip()
     if domain not in ALLOWED_DOMAINS:
@@ -544,7 +613,7 @@ async def url_remove(interaction: discord.Interaction, domain: str):
 
 
 @bot.tree.command(name="url-list", description="許可されているURLドメイン一覧を表示します（スタッフのみ）")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def url_list(interaction: discord.Interaction):
     if not ALLOWED_DOMAINS:
         await interaction.response.send_message("📋 許可されているドメインはありません。", ephemeral=True)
@@ -560,7 +629,7 @@ async def url_list(interaction: discord.Interaction):
 
 @bot.tree.command(name="badword-add", description="禁止ワードを追加します（スタッフのみ）")
 @app_commands.describe(word="追加する禁止ワード")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def badword_add(interaction: discord.Interaction, word: str):
     if word in BAD_WORDS:
         await interaction.response.send_message(f"⚠️ `{word}` はすでに登録されています。", ephemeral=True)
@@ -573,7 +642,7 @@ async def badword_add(interaction: discord.Interaction, word: str):
 
 @bot.tree.command(name="badword-remove", description="禁止ワードを削除します（スタッフのみ）")
 @app_commands.describe(word="削除する禁止ワード")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def badword_remove(interaction: discord.Interaction, word: str):
     if word not in BAD_WORDS:
         await interaction.response.send_message(f"❌ `{word}` は登録されていません。", ephemeral=True)
@@ -584,17 +653,69 @@ async def badword_remove(interaction: discord.Interaction, word: str):
     await log_action(interaction.guild, "🗑️ 禁止ワード削除", interaction.user, f"削除ワード: `{word}`")
 
 
-@bot.tree.command(name="badword-list", description="禁止ワード一覧を表示します（スタッフのみ）")
-@app_commands.checks.has_permissions(administrator=True)
+@bot.tree.command(name="badword-list", description="禁止ワード一覧を表示します（全員閲覧可能）")
 async def badword_list(interaction: discord.Interaction):
     if not BAD_WORDS:
-        await interaction.response.send_message("📋 禁止ワードは登録されていません。", ephemeral=True)
+        await interaction.response.send_message("📋 禁止ワードは登録されていません。")
         return
     word_list = "\n".join([f"・{w}" for w in BAD_WORDS])
     embed = discord.Embed(
         title="🚫 禁止ワード一覧",
         description=word_list,
         color=discord.Color.red()
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+# ===========================
+# ===== 長文スパム除外チャンネル管理 =====
+# ===========================
+
+@bot.tree.command(name="spam-ignore-add", description="長文スパム検知を無効にするチャンネル/スレッドを追加します（スタッフのみ）")
+@app_commands.describe(channel="除外するチャンネルまたはスレッド")
+@staff_check()
+async def spam_ignore_add(interaction: discord.Interaction, channel: discord.abc.GuildChannel):
+    global SPAM_IGNORE_IDS
+    if channel.id in SPAM_IGNORE_IDS:
+        await interaction.response.send_message(f"⚠️ {channel.mention} はすでに除外リストに登録されています。", ephemeral=True)
+        return
+    await add_spam_ignore_id(channel.id)
+    SPAM_IGNORE_IDS.add(channel.id)
+    await interaction.response.send_message(f"✅ {channel.mention} を長文スパム検知の除外リストに追加しました。", ephemeral=True)
+    await log_action(interaction.guild, "📋 スパム除外追加", interaction.user, f"チャンネル: {channel.mention} (`{channel.id}`)")
+
+
+@bot.tree.command(name="spam-ignore-remove", description="長文スパム検知の除外リストからチャンネル/スレッドを削除します（スタッフのみ）")
+@app_commands.describe(channel="除外リストから外すチャンネルまたはスレッド")
+@staff_check()
+async def spam_ignore_remove(interaction: discord.Interaction, channel: discord.abc.GuildChannel):
+    global SPAM_IGNORE_IDS
+    if channel.id not in SPAM_IGNORE_IDS:
+        await interaction.response.send_message(f"❌ {channel.mention} は除外リストに登録されていません。", ephemeral=True)
+        return
+    await remove_spam_ignore_id(channel.id)
+    SPAM_IGNORE_IDS.discard(channel.id)
+    await interaction.response.send_message(f"✅ {channel.mention} を除外リストから削除しました。", ephemeral=True)
+    await log_action(interaction.guild, "🗑️ スパム除外削除", interaction.user, f"チャンネル: {channel.mention} (`{channel.id}`)")
+
+
+@bot.tree.command(name="spam-ignore-list", description="長文スパム検知の除外リストを表示します（スタッフのみ）")
+@staff_check()
+async def spam_ignore_list(interaction: discord.Interaction):
+    if not SPAM_IGNORE_IDS:
+        await interaction.response.send_message("📋 除外リストにチャンネルはありません。", ephemeral=True)
+        return
+    lines = []
+    for cid in SPAM_IGNORE_IDS:
+        ch = interaction.guild.get_channel(cid)
+        if ch:
+            lines.append(f"・{ch.mention} (`{cid}`)")
+        else:
+            lines.append(f"・不明なチャンネル (`{cid}`)")
+    embed = discord.Embed(
+        title="📋 長文スパム検知 除外リスト",
+        description="\n".join(lines),
+        color=discord.Color.blurple()
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -610,7 +731,7 @@ async def badword_list(interaction: discord.Interaction):
     mod_log="モデレーションログチャンネル",
     backup_channel="自動バックアップ送信チャンネル"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def setup(
     interaction: discord.Interaction,
     auth_category: discord.CategoryChannel = None,
@@ -794,7 +915,7 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str, labe
 
 @bot.tree.command(name="auth-panel", description="認証リクエストパネルを送信します（管理者のみ）")
 @app_commands.describe(category="認証チケット用カテゴリ（省略で現在の設定を使用）")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def send_auth_panel(interaction: discord.Interaction, category: discord.CategoryChannel = None):
     if category:
         await set_config("auth_category_id", category.id)
@@ -812,7 +933,7 @@ async def send_auth_panel(interaction: discord.Interaction, category: discord.Ca
     support_category="サポート・質問チケット用カテゴリ",
     inquiry_category="お問い合わせチケット用カテゴリ"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def send_panel(interaction: discord.Interaction, support_category: discord.CategoryChannel = None, inquiry_category: discord.CategoryChannel = None):
     if support_category:
         await set_config("ticket_category_id", support_category.id)
@@ -832,7 +953,7 @@ async def send_panel(interaction: discord.Interaction, support_category: discord
 
 @bot.tree.command(name="inquiry-panel", description="お問い合わせパネルを送信します（管理者のみ）")
 @app_commands.describe(category="お問い合わせチケット用カテゴリ（省略で現在の設定を使用）")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def send_inquiry_panel(interaction: discord.Interaction, category: discord.CategoryChannel = None):
     if category:
         await set_config("inquiry_category_id", category.id)
@@ -861,7 +982,7 @@ async def botstatus(interaction: discord.Interaction):
     embed.add_field(name="🔑 認証カテゴリ", value=auth_cat.name if auth_cat else "❌ 未設定", inline=True)
     embed.add_field(name="📋 チケットログ", value=log_ch.mention if log_ch else "❌ 未設定", inline=True)
     embed.add_field(name="🔨 モデレーションログ", value=mod_log_ch.mention if mod_log_ch else "チケットログと共用", inline=True)
-    embed.add_field(name="🛡️ AutoMod設定", value=f"長文: **{MAX_MESSAGE_LENGTH}文字**以上 / 改行: **{MAX_NEWLINES}回**以上 / 連続: **{SPAM_COUNT}回** / 複数垢: **{CONTENT_SPAM_SECONDS}秒**に**{CONTENT_SPAM_USERS}人** / TO: **{TIMEOUT_MINUTES}分**", inline=False)
+    embed.add_field(name="🛡️ AutoMod設定", value=f"長文: **{MAX_MESSAGE_LENGTH}文字**以上\n改行: **{MAX_NEWLINES}回**以上\n連続スパム: **{SPAM_COUNT}回**\n複数垢スパム: **{CONTENT_SPAM_SECONDS}秒**以内に**{CONTENT_SPAM_USERS}人**\n自動TO: **{TIMEOUT_MINUTES}分**", inline=False)
     domain_list = "\n".join([f"・{d}" for d in ALLOWED_DOMAINS]) if ALLOWED_DOMAINS else "なし"
     embed.add_field(name="🔗 許可URL", value=domain_list, inline=False)
     word_list = "　".join([f"`{w}`" for w in BAD_WORDS]) if BAD_WORDS else "なし"
@@ -877,7 +998,7 @@ async def botstatus(interaction: discord.Interaction):
 # ===========================
 
 @bot.tree.command(name="backup", description="サーバーのチャンネル構成とロールをバックアップします（管理者のみ）")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def backup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
@@ -955,7 +1076,7 @@ async def backup(interaction: discord.Interaction):
 
 @bot.tree.command(name="restore", description="バックアップからチャンネル構成とロールを復元します（管理者のみ）")
 @app_commands.describe(file="backupコマンドで生成したJSONファイル")
-@app_commands.checks.has_permissions(administrator=True)
+@staff_check()
 async def restore(interaction: discord.Interaction, file: discord.Attachment):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
@@ -1065,8 +1186,9 @@ AUTH_TICKET_TIMEOUT_HOURS = 0.083  # 認証チケット: 5分（=5/60時間）
 
 @bot.event
 async def on_ready():
-    global BAD_WORDS
+    global BAD_WORDS, SPAM_IGNORE_IDS
     BAD_WORDS = await load_bad_words_db()
+    SPAM_IGNORE_IDS = set(await get_spam_ignore_ids())
     check_auth_tickets.start()
     auto_backup.start()
     bot.add_view(TicketPanelView())
