@@ -515,8 +515,8 @@ async def badword_add(interaction: discord.Interaction, word: str):
     if word in BAD_WORDS:
         await interaction.response.send_message(f"⚠️ `{word}` はすでに登録されています。", ephemeral=True)
         return
+    add_bad_word_db(word)
     BAD_WORDS.append(word)
-    save_bad_words(BAD_WORDS)
     await interaction.response.send_message(f"✅ `{word}` を禁止ワードに追加しました。", ephemeral=True)
     await log_action(interaction.guild, "🚫 禁止ワード追加", interaction.user, f"追加ワード: `{word}`")
 
@@ -528,8 +528,8 @@ async def badword_remove(interaction: discord.Interaction, word: str):
     if word not in BAD_WORDS:
         await interaction.response.send_message(f"❌ `{word}` は登録されていません。", ephemeral=True)
         return
+    remove_bad_word_db(word)
     BAD_WORDS.remove(word)
-    save_bad_words(BAD_WORDS)
     await interaction.response.send_message(f"✅ `{word}` を禁止ワードから削除しました。", ephemeral=True)
     await log_action(interaction.guild, "🗑️ 禁止ワード削除", interaction.user, f"削除ワード: `{word}`")
 
