@@ -302,9 +302,25 @@ async def on_message(message: discord.Message):
 
 async def auto_punish(member: discord.Member, guild: discord.Guild, count: int):
     """警告回数に応じて自動処罰"""
+    from datetime import timedelta
     if count == 3:
-        await member.timeout(discord.utils.utcnow() + __import__("datetime").timedelta(minutes=10), reason="警告3回（AutoMod）")
-        await log_action(guild, "⏱️ タイムアウト10分", member, "警告3回に達したため")
+        try:
+            await member.timeout(discord.utils.utcnow() + timedelta(minutes=5), reason="警告3回（AutoMod）")
+            await log_action(guild, "⏱️ タイムアウト5分", member, "警告3回に達したため")
+        except (discord.errors.Forbidden, discord.errors.HTTPException):
+            await log_action(guild, "⚠️ タイムアウト失敗", member, "権限不足のためタイムアウトできませんでした")
+    elif count == 5:
+        try:
+            await member.timeout(discord.utils.utcnow() + timedelta(minutes=30), reason="警告5回（AutoMod）")
+            await log_action(guild, "⏱️ タイムアウト30分", member, "警告5回に達したため")
+        except (discord.errors.Forbidden, discord.errors.HTTPException):
+            await log_action(guild, "⚠️ タイムアウト失敗", member, "権限不足のためタイムアウトできませんでした")
+    elif count >= 7:
+        try:
+            await member.timeout(discord.utils.utcnow() + timedelta(hours=1), reason="警告7回以上（AutoMod）")
+            await log_action(guild, "⏱️ タイムアウト1時間", member, "警告7回以上に達したため")
+        except (discord.errors.Forbidden, discord.errors.HTTPException):
+            await log_action(guild, "⚠️ タイムアウト失敗", member, "権限不足のためタイムアウトできませんでした")
 
 
 # ===========================
@@ -539,7 +555,6 @@ async def badword_list(interaction: discord.Interaction):
 
 @bot.tree.command(name="setup", description="ボットの設定を一括で行います（管理者のみ）")
 @app_commands.describe(
-    ticket_category="チケット用カテゴリ",
     auth_category="認証チケット用カテゴリ",
     ticket_log="チケットログチャンネル",
     mod_log="モデレーションログチャンネル",
@@ -548,7 +563,6 @@ async def badword_list(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(administrator=True)
 async def setup(
     interaction: discord.Interaction,
-    ticket_category: discord.CategoryChannel = None,
     auth_category: discord.CategoryChannel = None,
     ticket_log: discord.TextChannel = None,
     mod_log: discord.TextChannel = None,
@@ -573,9 +587,6 @@ async def setup(
         return
 
     changed = []
-    if ticket_category:
-        config["ticket_category_id"] = ticket_category.id
-        changed.append(f"🎫 チケットカテゴリ → **{ticket_category.name}**")
     if auth_category:
         config["auth_category_id"] = auth_category.id
         changed.append(f"🔑 認証カテゴリ → **{auth_category.name}**")
@@ -752,14 +763,27 @@ async def send_auth_panel(interaction: discord.Interaction, category: discord.Ca
     await interaction.response.send_message("✅ 認証リクエストパネルを送信しました。", ephemeral=True)
 
 
-@bot.tree.command(name="ticket-panel", description="サポートチケットパネルを送信します（管理者のみ）")
-@app_commands.describe(category="サポートチケット用カテゴリ（省略で現在の設定を使用）")
+@bot.tree.command(name="ticket-panel", description="サポート＆お問い合わせパネルを送信します（管理者のみ）")
+@app_commands.describe(
+    support_category="サポート・質問チケット用カテゴリ",
+    inquiry_category="お問い合わせチケット用カテゴリ"
+)
 @app_commands.checks.has_permissions(administrator=True)
-async def send_panel(interaction: discord.Interaction, category: discord.CategoryChannel = None):
-    if category:
-        config["ticket_category_id"] = category.id
+async def send_panel(interaction: discord.Interaction, support_category: discord.CategoryChannel = None, inquiry_category: discord.CategoryChannel = None):
+    if support_category:
+        config["ticket_category_id"] = support_category.id
         save_config(config)
-    embed = discord.Embed(title="🎫 サポートチケット", description="❓ **サポート・質問** — サーバーに関する質問・サポート", color=discord.Color.blurple())
+    if inquiry_category:
+        config["inquiry_category_id"] = inquiry_category.id
+        save_config(config)
+    embed = discord.Embed(
+        title="🎫 サポートチケット",
+        description=(
+            "❓ **サポート・質問** — サーバーに関する質問・サポート\n"
+            "📩 **お問い合わせ** — その他のお問い合わせ"
+        ),
+        color=discord.Color.blurple()
+    )
     await interaction.channel.send(embed=embed, view=TicketPanelView())
     await interaction.response.send_message("✅ パネルを送信しました。", ephemeral=True)
 
