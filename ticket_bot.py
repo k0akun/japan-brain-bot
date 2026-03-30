@@ -246,10 +246,10 @@ async def on_message(message: discord.Message):
         if len(similar) + 1 >= CONTENT_SPAM_USERS:
             guilty_ids = {uid for uid, _, _ in similar} | {message.author.id}
             content_spam_cache[:] = [(uid, t, ts) for uid, t, ts in content_spam_cache if uid not in guilty_ids]
+            from datetime import timedelta
             for uid in guilty_ids:
                 m = message.guild.get_member(uid)
                 if m and not m.guild_permissions.administrator:
-                    from datetime import timedelta
                     try:
                         await m.timeout(discord.utils.utcnow() + timedelta(minutes=TIMEOUT_MINUTES), reason="複数アカウントスパム検知")
                     except Exception:
@@ -262,10 +262,11 @@ async def on_message(message: discord.Message):
                         )
                     except Exception:
                         pass
-            try:
-                await message.channel.purge(limit=10, check=lambda m: m.author.id == message.author.id, bulk=True)
-            except Exception:
-                pass
+                    # 全員分のメッセージを削除
+                    try:
+                        await message.channel.purge(limit=20, check=lambda msg, u=uid: msg.author.id == u, bulk=True)
+                    except Exception:
+                        pass
             await log_action(message.guild, "🚨 複数アカウントスパム検知", message.author, f"対象ID: {guilty_ids}")
             return
 
@@ -392,6 +393,40 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
     await interaction.response.send_message(f"⚠️ {member.mention} に警告を出しました。({count}回目)\n理由: {reason}")
     await log_action(interaction.guild, "⚠️ 警告", member, f"理由: {reason} | 合計{count}回")
     await auto_punish(member, interaction.guild, count)
+
+
+@bot.tree.command(name="warnlist", description="全員の警告数一覧を表示します（スタッフのみ）")
+@app_commands.checks.has_permissions(administrator=True)
+async def warnlist(interaction: discord.Interaction):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT user_id, count FROM warns WHERE count > 0 ORDER BY count DESC")
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        await interaction.response.send_message("📋 警告のあるユーザーはいません。", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="⚠️ 警告数一覧",
+        color=discord.Color.orange(),
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    lines = []
+    for user_id, count in rows:
+        member = interaction.guild.get_member(user_id)
+        name = member.mention if member else f"ID: {user_id}（退出済み）"
+        lines.append(f"{name} → **{count}回**")
+
+    # 25件ずつ分割（embedの文字数制限対策）
+    chunk = "\n".join(lines[:25])
+    embed.description = chunk
+    if len(lines) > 25:
+        embed.set_footer(text=f"他 {len(lines) - 25} 人")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="warns", description="ユーザーの警告数を確認します")
@@ -738,7 +773,7 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str, labe
     if auth:
         mention_text = member.mention  # 認証チケットはスタッフメンションなし
     else:
-        mention_text = f"{member.mention} {admin_role.mention}" if admin_role else member.mention
+        mention_text = member.mention
     if auth:
         desc = (
             f"{member.mention} 認証リクエストを受け付けました。\n\n"
