@@ -14,6 +14,8 @@ import time
 
 # ===== 設定 =====
 TOKEN = os.environ.get("TOKEN")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://fdajbuwhxxmwunpxpkwf.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 ADMIN_ROLE_ID = 1486603522748317737
 
 SPAM_LIMIT = 5
@@ -21,67 +23,100 @@ SPAM_INTERVAL = 5
 RAID_ACCOUNT_AGE_DAYS = 7
 RAID_JOIN_LIMIT = 5
 RAID_JOIN_INTERVAL = 10
-# 追加AutoMod設定
-MAX_MESSAGE_LENGTH = 140   # 長文検知: 文字数上限
-MAX_NEWLINES = 10          # 改行スパム: 改行数上限
-TIMEOUT_MINUTES = 5        # 自動タイムアウト時間（分）
-SPAM_COUNT = 3             # 連続同一メッセージ: 何回でタイムアウト
-CONTENT_SPAM_USERS = 4    # 複数アカウントスパム: 何人でタイムアウト
-CONTENT_SPAM_SECONDS = 10  # 複数アカウントスパム: 何秒以内
-CONTENT_SPAM_RATIO = 0.80  # 複数アカウントスパム: 類似度しきい値
-CONTENT_SPAM_PREFIX = 8    # 複数アカウントスパム: 前半一致文字数
+MAX_MESSAGE_LENGTH = 140
+MAX_NEWLINES = 10
+TIMEOUT_MINUTES = 5
+SPAM_COUNT = 3
+CONTENT_SPAM_USERS = 4
+CONTENT_SPAM_SECONDS = 10
+CONTENT_SPAM_RATIO = 0.80
+CONTENT_SPAM_PREFIX = 8
 # ================
 
-# ===== サーバー設定をJSONで管理 =====
-CONFIG_FILE = "config.json"
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+# ===== Supabase HTTPクライアント =====
+def sb_headers():
     return {
-        "ticket_category_id": None,
-        "auth_category_id": None,
-        "log_channel_id": None,
-        "mod_log_channel_id": None,
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
     }
 
-def save_config(cfg):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+async def sb_get(table: str, params: str = ""):
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"{SUPABASE_URL}/rest/v1/{table}?{params}", headers=sb_headers()) as r:
+            return await r.json()
 
-config = load_config()
+async def sb_upsert(table: str, data: dict):
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"{SUPABASE_URL}/rest/v1/{table}", headers={**sb_headers(), "Prefer": "resolution=merge-duplicates,return=representation"}, json=data) as r:
+            return await r.json()
 
-def get_ticket_category_id():
-    return config.get("ticket_category_id")
+async def sb_delete(table: str, params: str):
+    async with aiohttp.ClientSession() as s:
+        async with s.delete(f"{SUPABASE_URL}/rest/v1/{table}?{params}", headers=sb_headers()) as r:
+            return r.status
 
-def get_auth_category_id():
-    return config.get("auth_category_id")
+# ===== 警告データ（Supabase） =====
+async def get_warns(user_id: int) -> int:
+    rows = await sb_get("warns", f"user_id=eq.{user_id}")
+    if rows and len(rows) > 0:
+        return rows[0].get("count", 0)
+    return 0
 
-def get_log_channel_id():
-    return config.get("log_channel_id")
+async def set_warns(user_id: int, count: int):
+    await sb_upsert("warns", {"user_id": user_id, "count": count})
 
-def get_backup_channel_id():
-    return config.get("backup_channel_id")
+async def reset_warns(user_id: int):
+    await sb_upsert("warns", {"user_id": user_id, "count": 0})
 
-def get_mod_log_channel_id():
-    # 未設定の場合はチケットログチャンネルにフォールバック
-    return config.get("mod_log_channel_id") or config.get("log_channel_id")
+# ===== 禁止ワード（Supabase） =====
+DEFAULT_BAD_WORDS = ["@everyone", "@here", "ガイジ", "がいじ", "カス", "きえろ", "ちんこ", "まんこ", "死ね", "消えろ", "障害", "障害者", "貧乏", "死んどけ", "人殺し", "施設育ち", "がいきち", "ガイキチ", "きちがい", "キチガイ", "ゲイ", "そちん", "ちんぽ", "ちんちん", "テンガ", "TENGA"]
 
-# ===== 禁止ワードをJSONで管理 =====
-BAD_WORDS_FILE = "bad_words.json"
+async def load_bad_words_db() -> list:
+    rows = await sb_get("bad_words", "select=word")
+    if rows and len(rows) > 0:
+        return [r["word"] for r in rows]
+    # 初回：デフォルトワードを登録
+    for word in DEFAULT_BAD_WORDS:
+        await sb_upsert("bad_words", {"word": word})
+    return DEFAULT_BAD_WORDS
 
-def load_bad_words():
-    if os.path.exists(BAD_WORDS_FILE):
-        with open(BAD_WORDS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return ["死ね", "殺す", "アホ", "シコシコ", "クンニ", "障害者", "しこしこ", "うんち", "うんこ", "だまれ", "sex"]
+async def add_bad_word_db(word: str):
+    await sb_upsert("bad_words", {"word": word})
 
-def save_bad_words(words):
-    with open(BAD_WORDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(words, f, ensure_ascii=False, indent=2)
+async def remove_bad_word_db(word: str):
+    await sb_delete("bad_words", f"word=eq.{word}")
 
-BAD_WORDS = load_bad_words()
+# ===== サーバー設定（Supabase） =====
+async def get_config(key: str):
+    rows = await sb_get("config", f"key=eq.{key}&select=value")
+    if rows and len(rows) > 0:
+        val = rows[0].get("value")
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return val
+    return None
+
+async def set_config(key: str, value):
+    await sb_upsert("config", {"key": key, "value": str(value)})
+
+async def get_ticket_category_id():
+    return await get_config("ticket_category_id")
+
+async def get_auth_category_id():
+    return await get_config("auth_category_id")
+
+async def get_log_channel_id():
+    return await get_config("log_channel_id")
+
+async def get_mod_log_channel_id():
+    val = await get_config("mod_log_channel_id")
+    return val or await get_config("log_channel_id")
+
+async def get_backup_channel_id():
+    return await get_config("backup_channel_id")
 
 # ===== 許可するURLドメイン =====
 ALLOWED_DOMAINS = [
@@ -98,27 +133,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # スパム検知用メモリ
 spam_tracker = defaultdict(list)
-# 追加AutoMod用キャッシュ
 same_msg_cache = defaultdict(lambda: {"content": "", "count": 0})
-content_spam_cache = []  # [(user_id, text, timestamp)]
-
-# レイド検知用メモリ
+content_spam_cache = []
 join_tracker = []
 
-# 警告数をJSONで永続化
-WARN_FILE = "warns.json"
-
-def load_warns():
-    if os.path.exists(WARN_FILE):
-        with open(WARN_FILE, "r", encoding="utf-8") as f:
-            return {int(k): v for k, v in json.load(f).items()}
-    return {}
-
-def save_warns():
-    with open(WARN_FILE, "w", encoding="utf-8") as f:
-        json.dump(warn_tracker, f, ensure_ascii=False, indent=2)
-
-warn_tracker = load_warns()
+# 禁止ワードはBot起動時にSupabaseから読み込む
+BAD_WORDS = []
 
 
 # ===========================
@@ -267,9 +287,8 @@ async def on_message(message: discord.Message):
     for word in BAD_WORDS:
         if word in message.content:
             await message.delete()
-            warn_tracker[message.author.id] = warn_tracker.get(message.author.id, 0) + 1
-            count = warn_tracker[message.author.id]
-            save_warns()
+            count = await get_warns(message.author.id) + 1
+            await set_warns(message.author.id, count)
             await message.channel.send(
                 f"⚠️ {message.author.mention} 禁止ワードが含まれています。(警告 {count}回目)",
                 delete_after=5
@@ -286,9 +305,8 @@ async def on_message(message: discord.Message):
 
     if len(spam_tracker[user_id]) >= SPAM_LIMIT:
         spam_tracker[user_id] = []
-        warn_tracker[user_id] = warn_tracker.get(user_id, 0) + 1
-        count = warn_tracker[user_id]
-        save_warns()
+        count = await get_warns(user_id) + 1
+        await set_warns(user_id, count)
         await message.channel.send(
             f"⚠️ {message.author.mention} スパムを検知しました。(警告 {count}回目)",
             delete_after=5
@@ -348,7 +366,8 @@ async def on_member_join(member: discord.Member):
     # レイド検知
     if len(join_tracker) >= RAID_JOIN_LIMIT:
         join_tracker.clear()
-        log_channel = member.guild.get_channel(get_log_channel_id())
+        log_ch_id = await get_log_channel_id()
+        log_channel = member.guild.get_channel(log_ch_id) if log_ch_id else None
         if log_channel:
             embed = discord.Embed(
                 title="🚨 レイド警告！",
@@ -368,9 +387,8 @@ async def on_member_join(member: discord.Member):
 @app_commands.describe(member="警告するユーザー", reason="理由")
 @app_commands.checks.has_permissions(administrator=True)
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "理由なし"):
-    warn_tracker[member.id] = warn_tracker.get(member.id, 0) + 1
-    count = warn_tracker[member.id]
-    save_warns()
+    count = await get_warns(member.id) + 1
+    await set_warns(member.id, count)
     await interaction.response.send_message(f"⚠️ {member.mention} に警告を出しました。({count}回目)\n理由: {reason}")
     await log_action(interaction.guild, "⚠️ 警告", member, f"理由: {reason} | 合計{count}回")
     await auto_punish(member, interaction.guild, count)
@@ -380,7 +398,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 @app_commands.describe(member="確認するユーザー")
 @app_commands.checks.has_permissions(administrator=True)
 async def warns(interaction: discord.Interaction, member: discord.Member):
-    count = warn_tracker.get(member.id, 0)
+    count = await get_warns(member.id)
     await interaction.response.send_message(f"📋 {member.mention} の警告数: **{count}回**", ephemeral=True)
 
 
@@ -388,8 +406,7 @@ async def warns(interaction: discord.Interaction, member: discord.Member):
 @app_commands.describe(member="リセットするユーザー")
 @app_commands.checks.has_permissions(administrator=True)
 async def clearwarn(interaction: discord.Interaction, member: discord.Member):
-    warn_tracker[member.id] = 0
-    save_warns()
+    await reset_warns(member.id)
     await interaction.response.send_message(f"✅ {member.mention} の警告をリセットしました。", ephemeral=True)
     await log_action(interaction.guild, "🔄 警告リセット", member, f"実行者: {interaction.user}")
 
@@ -440,8 +457,7 @@ async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, 
 # ===========================
 
 async def log_action(guild: discord.Guild, action: str, user, detail: str = ""):
-    """モデレーションログ（警告・キック・BAN・AutoModなど）"""
-    ch_id = get_mod_log_channel_id()
+    ch_id = await get_mod_log_channel_id()
     log_channel = guild.get_channel(ch_id) if ch_id else None
     if not log_channel:
         return
@@ -455,8 +471,7 @@ async def log_action(guild: discord.Guild, action: str, user, detail: str = ""):
 
 
 async def log_ticket(guild: discord.Guild, embed: discord.Embed, file=None):
-    """チケットログ専用"""
-    ch_id = get_log_channel_id()
+    ch_id = await get_log_channel_id()
     log_channel = guild.get_channel(ch_id) if ch_id else None
     if not log_channel:
         return
@@ -515,7 +530,7 @@ async def badword_add(interaction: discord.Interaction, word: str):
     if word in BAD_WORDS:
         await interaction.response.send_message(f"⚠️ `{word}` はすでに登録されています。", ephemeral=True)
         return
-    add_bad_word_db(word)
+    await add_bad_word_db(word)
     BAD_WORDS.append(word)
     await interaction.response.send_message(f"✅ `{word}` を禁止ワードに追加しました。", ephemeral=True)
     await log_action(interaction.guild, "🚫 禁止ワード追加", interaction.user, f"追加ワード: `{word}`")
@@ -528,7 +543,7 @@ async def badword_remove(interaction: discord.Interaction, word: str):
     if word not in BAD_WORDS:
         await interaction.response.send_message(f"❌ `{word}` は登録されていません。", ephemeral=True)
         return
-    remove_bad_word_db(word)
+    await remove_bad_word_db(word)
     BAD_WORDS.remove(word)
     await interaction.response.send_message(f"✅ `{word}` を禁止ワードから削除しました。", ephemeral=True)
     await log_action(interaction.guild, "🗑️ 禁止ワード削除", interaction.user, f"削除ワード: `{word}`")
@@ -569,49 +584,37 @@ async def setup(
     backup_channel: discord.TextChannel = None
 ):
     if not any([auth_category, ticket_log, mod_log, backup_channel]):
-        # 何も指定されていなければ現在の設定を表示
         guild = interaction.guild
-        auth_cat = guild.get_channel(config.get("auth_category_id")) if config.get("auth_category_id") else None
-        log_ch = guild.get_channel(config.get("log_channel_id")) if config.get("log_channel_id") else None
-        mod_ch = guild.get_channel(config.get("mod_log_channel_id")) if config.get("mod_log_channel_id") else None
+        auth_cat_id = await get_auth_category_id()
+        log_id = await get_log_channel_id()
+        mod_id = await get_mod_log_channel_id()
+        bk_id = await get_backup_channel_id()
+        auth_cat = guild.get_channel(auth_cat_id) if auth_cat_id else None
+        log_ch = guild.get_channel(log_id) if log_id else None
+        mod_ch = guild.get_channel(mod_id) if mod_id else None
+        bk_ch = guild.get_channel(bk_id) if bk_id else None
         embed = discord.Embed(title="⚙️ 現在の設定", color=discord.Color.blurple())
         embed.add_field(name="🔑 認証チケットカテゴリ", value=auth_cat.name if auth_cat else "❌ 未設定", inline=False)
         embed.add_field(name="📋 チケットログ", value=log_ch.mention if log_ch else "❌ 未設定", inline=False)
-        bk_id = config.get("backup_channel_id")
-        bk_ch = guild.get_channel(bk_id) if bk_id else None
         embed.add_field(name="🔨 モデレーションログ", value=mod_ch.mention if mod_ch else "⚠️ 未設定（チケットログと共用）", inline=False)
-        embed.add_field(name="💾 バックアップチャンネル", value=bk_ch.mention if bk_ch else "⚠️ 未設定（モデレーションログと共用）", inline=False)
+        embed.add_field(name="💾 バックアップチャンネル", value=bk_ch.mention if bk_ch else "⚠️ 未設定", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
     changed = []
     if auth_category:
-        config["auth_category_id"] = auth_category.id
+        await set_config("auth_category_id", auth_category.id)
         changed.append(f"🔑 認証カテゴリ → **{auth_category.name}**")
     if ticket_log:
-        config["log_channel_id"] = ticket_log.id
+        await set_config("log_channel_id", ticket_log.id)
         changed.append(f"📋 チケットログ → {ticket_log.mention}")
     if mod_log:
-        config["mod_log_channel_id"] = mod_log.id
+        await set_config("mod_log_channel_id", mod_log.id)
         changed.append(f"🔨 モデレーションログ → {mod_log.mention}")
     if backup_channel:
-        config["backup_channel_id"] = backup_channel.id
+        await set_config("backup_channel_id", backup_channel.id)
         changed.append(f"💾 バックアップチャンネル → {backup_channel.mention}")
-        # 設定した瞬間に即バックアップを送信
-        data = await create_backup(interaction.guild)
-        save_backup(data)
-        filename = f"backup-{interaction.guild.id}-{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
-        json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-        file = discord.File(fp=io.BytesIO(json_bytes), filename=filename)
-        embed_bk = discord.Embed(
-            title="💾 バックアップ開始",
-            description=f"バックアップチャンネルを設定しました。これより1時間ごとに自動バックアップを送信します。",
-            color=discord.Color.green(),
-            timestamp=datetime.now(timezone.utc)
-        )
-        await backup_channel.send(embed=embed_bk, file=file)
 
-    save_config(config)
     embed = discord.Embed(title="✅ 設定を更新しました", description="\n".join(changed), color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -677,7 +680,8 @@ class TicketView(discord.ui.View):
             for attachment in msg.attachments:
                 log_text += f"  [添付ファイル: {attachment.url}]\n"
 
-        log_channel = interaction.guild.get_channel(get_log_channel_id())
+        log_ch_id = await get_log_channel_id()
+        log_channel = interaction.guild.get_channel(log_ch_id) if log_ch_id else None
         if log_channel:
             import io
             log_file = discord.File(fp=io.StringIO(log_text), filename=f"{channel.name}-{datetime.now().strftime('%Y%m%d%H%M%S')}.txt")
@@ -692,20 +696,16 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str, labe
     guild = interaction.guild
     member = interaction.user
     if auth:
-        category = guild.get_channel(get_auth_category_id())
+        cat_id = await get_auth_category_id()
+        category = guild.get_channel(cat_id) if cat_id else None
         if category is None:
-            await interaction.response.send_message(
-                "❌ 認証チケット用カテゴリが未設定です。管理者が `/setup-auth-category` で設定してください。",
-                ephemeral=True
-            )
+            await interaction.response.send_message("❌ 認証チケット用カテゴリが未設定です。`/setup` で設定してください。", ephemeral=True)
             return
     else:
-        category = guild.get_channel(get_ticket_category_id())
+        cat_id = await get_ticket_category_id()
+        category = guild.get_channel(cat_id) if cat_id else None
         if category is None:
-            await interaction.response.send_message(
-                "❌ チケット用カテゴリが未設定です。管理者が `/setup-ticket-category` で設定してください。",
-                ephemeral=True
-            )
+            await interaction.response.send_message("❌ チケット用カテゴリが未設定です。`/setup` で設定してください。", ephemeral=True)
             return
 
     existing = discord.utils.get(category.channels, name=f"{ticket_type}-{member.name.lower()}")
@@ -750,8 +750,7 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str, labe
 @app_commands.checks.has_permissions(administrator=True)
 async def send_auth_panel(interaction: discord.Interaction, category: discord.CategoryChannel = None):
     if category:
-        config["auth_category_id"] = category.id
-        save_config(config)
+        await set_config("auth_category_id", category.id)
     embed = discord.Embed(
         title="🔑 認証リクエスト",
         description="認証ができない方はボタンを押してリクエストを送ってください。\n\n🔑 **認証リクエスト** — 認証ができない方向けのサポート",
@@ -769,11 +768,9 @@ async def send_auth_panel(interaction: discord.Interaction, category: discord.Ca
 @app_commands.checks.has_permissions(administrator=True)
 async def send_panel(interaction: discord.Interaction, support_category: discord.CategoryChannel = None, inquiry_category: discord.CategoryChannel = None):
     if support_category:
-        config["ticket_category_id"] = support_category.id
-        save_config(config)
+        await set_config("ticket_category_id", support_category.id)
     if inquiry_category:
-        config["inquiry_category_id"] = inquiry_category.id
-        save_config(config)
+        await set_config("inquiry_category_id", inquiry_category.id)
     embed = discord.Embed(
         title="🎫 サポートチケット",
         description=(
@@ -791,8 +788,7 @@ async def send_panel(interaction: discord.Interaction, support_category: discord
 @app_commands.checks.has_permissions(administrator=True)
 async def send_inquiry_panel(interaction: discord.Interaction, category: discord.CategoryChannel = None):
     if category:
-        config["inquiry_category_id"] = category.id
-        save_config(config)
+        await set_config("inquiry_category_id", category.id)
     embed = discord.Embed(title="📩 お問い合わせ", description="📩 **お問い合わせ** — その他のお問い合わせはこちら", color=discord.Color.blurple())
     await interaction.channel.send(embed=embed, view=InquiryPanelView())
     await interaction.response.send_message("✅ お問い合わせパネルを送信しました。", ephemeral=True)
@@ -1021,6 +1017,8 @@ AUTH_TICKET_TIMEOUT_HOURS = 0.083  # 認証チケット: 5分（=5/60時間）
 
 @bot.event
 async def on_ready():
+    global BAD_WORDS
+    BAD_WORDS = await load_bad_words_db()
     check_auth_tickets.start()
     auto_backup.start()
     bot.add_view(TicketPanelView())
@@ -1037,10 +1035,8 @@ async def on_ready():
 
 @tasks.loop(minutes=2)
 async def check_auth_tickets():
-    """チケットを10分応答がなければ自動削除"""
-    from datetime import timedelta, timezone as tz
-    auth_cat_id = config.get("auth_category_id")
-    ticket_cat_id = config.get("ticket_category_id")
+    auth_cat_id = await get_auth_category_id()
+    ticket_cat_id = await get_ticket_category_id()
 
     for guild in bot.guilds:
         # 認証チケット（10分）
@@ -1089,7 +1085,8 @@ async def _auto_delete_ticket(guild, channel, minutes: int):
 
 
 async def _delete_and_log(guild, channel, minutes: int):
-    log_channel = guild.get_channel(config.get("log_channel_id"))
+    ch_id = await get_log_channel_id()
+    log_channel = guild.get_channel(ch_id) if ch_id else None
     if log_channel:
         embed = discord.Embed(
             title="🗑️ チケット自動削除",
@@ -1177,11 +1174,9 @@ async def create_backup(guild: discord.Guild) -> dict:
 
 @tasks.loop(hours=1)
 async def auto_backup():
-    """1時間ごとに自動バックアップ"""
     for guild in bot.guilds:
         data = await create_backup(guild)
-        save_backup(data)
-        ch_id = get_backup_channel_id() or get_mod_log_channel_id()
+        ch_id = await get_backup_channel_id() or await get_mod_log_channel_id()
         log_ch = guild.get_channel(ch_id) if ch_id else None
         if log_ch:
             filename = f"auto-backup-{guild.id}-{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
