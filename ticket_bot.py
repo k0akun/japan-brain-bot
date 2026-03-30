@@ -568,15 +568,13 @@ async def setup(
     mod_log: discord.TextChannel = None,
     backup_channel: discord.TextChannel = None
 ):
-    if not any([ticket_category, auth_category, ticket_log, mod_log]):
+    if not any([auth_category, ticket_log, mod_log, backup_channel]):
         # 何も指定されていなければ現在の設定を表示
         guild = interaction.guild
-        cat = guild.get_channel(config.get("ticket_category_id")) if config.get("ticket_category_id") else None
         auth_cat = guild.get_channel(config.get("auth_category_id")) if config.get("auth_category_id") else None
         log_ch = guild.get_channel(config.get("log_channel_id")) if config.get("log_channel_id") else None
         mod_ch = guild.get_channel(config.get("mod_log_channel_id")) if config.get("mod_log_channel_id") else None
         embed = discord.Embed(title="⚙️ 現在の設定", color=discord.Color.blurple())
-        embed.add_field(name="🎫 チケットカテゴリ", value=cat.name if cat else "❌ 未設定", inline=False)
         embed.add_field(name="🔑 認証チケットカテゴリ", value=auth_cat.name if auth_cat else "❌ 未設定", inline=False)
         embed.add_field(name="📋 チケットログ", value=log_ch.mention if log_ch else "❌ 未設定", inline=False)
         bk_id = config.get("backup_channel_id")
