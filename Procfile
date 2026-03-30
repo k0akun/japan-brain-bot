@@ -1,1 +1,1 @@
-worker: python ticket_bot_v11.py
+worker: python ticket_bot.py
