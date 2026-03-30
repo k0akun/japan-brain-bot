@@ -11,8 +11,6 @@ from collections import defaultdict
 from difflib import SequenceMatcher
 import re
 import time
-import psycopg2
-from psycopg2.extras import RealDictCursor
 
 # ===== 設定 =====
 TOKEN = os.environ.get("TOKEN")
@@ -44,7 +42,6 @@ def load_config():
     return {
         "ticket_category_id": None,
         "auth_category_id": None,
-        "inquiry_category_id": None,
         "log_channel_id": None,
         "mod_log_channel_id": None,
     }
@@ -61,13 +58,11 @@ def get_ticket_category_id():
 def get_auth_category_id():
     return config.get("auth_category_id")
 
-def get_inquiry_category_id():
-    return config.get("inquiry_category_id")
-
 def get_log_channel_id():
     return config.get("log_channel_id")
 
 def get_mod_log_channel_id():
+    # 未設定の場合はチケットログチャンネルにフォールバック
     return config.get("mod_log_channel_id") or config.get("log_channel_id")
 
 # ===== 禁止ワードをJSONで管理 =====
@@ -77,7 +72,7 @@ def load_bad_words():
     if os.path.exists(BAD_WORDS_FILE):
         with open(BAD_WORDS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return ["死ね", "殺す", "アホ", "シコシコ", "クンニ", "障害者", "しこしこ", "うんち", "うんこ", "だまれ", "sex","@everyone"," @here","ガイジ","がいじ","カス","かす","きえろ","クズ","くず","消えろ","障害","片親","死んどけ","人殺し","ガイキチ","きちがい","キチガイ","イク","ゲイ","バイ","そちん","ちんぽ","まんこ","ちんこ","ちんちん","テンガ","TENGA","施設育ち"]
+    return ["死ね", "殺す", "アホ", "シコシコ", "クンニ", "障害者", "しこしこ", "うんち", "うんこ", "だまれ", "sex"]
 
 def save_bad_words(words):
     with open(BAD_WORDS_FILE, "w", encoding="utf-8") as f:
@@ -98,52 +93,6 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ===== Supabase (PostgreSQL) =====
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-def get_db():
-    return psycopg2.connect(DATABASE_URL)
-
-def init_db():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS warns (
-            user_id BIGINT PRIMARY KEY,
-            count INTEGER DEFAULT 0
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-def get_warns(user_id: int) -> int:
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT count FROM warns WHERE user_id = %s", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else 0
-
-def set_warns(user_id: int, count: int):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO warns (user_id, count) VALUES (%s, %s)
-        ON CONFLICT (user_id) DO UPDATE SET count = EXCLUDED.count
-    """, (user_id, count))
-    conn.commit()
-    conn.close()
-
-def add_warn(user_id: int) -> int:
-    count = get_warns(user_id) + 1
-    set_warns(user_id, count)
-    return count
-
-def remove_warns(user_id: int, amount: int) -> int:
-    count = max(0, get_warns(user_id) - amount)
-    set_warns(user_id, count)
-    return count
-
 # スパム検知用メモリ
 spam_tracker = defaultdict(list)
 # 追加AutoMod用キャッシュ
@@ -152,6 +101,21 @@ content_spam_cache = []  # [(user_id, text, timestamp)]
 
 # レイド検知用メモリ
 join_tracker = []
+
+# 警告数をJSONで永続化
+WARN_FILE = "warns.json"
+
+def load_warns():
+    if os.path.exists(WARN_FILE):
+        with open(WARN_FILE, "r", encoding="utf-8") as f:
+            return {int(k): v for k, v in json.load(f).items()}
+    return {}
+
+def save_warns():
+    with open(WARN_FILE, "w", encoding="utf-8") as f:
+        json.dump(warn_tracker, f, ensure_ascii=False, indent=2)
+
+warn_tracker = load_warns()
 
 
 # ===========================
@@ -174,6 +138,7 @@ async def punish_automod(member: discord.Member, guild: discord.Guild, channel: 
         await member.timeout(timeout_until, reason=reason)
     except (discord.errors.Forbidden, discord.errors.HTTPException):
         pass
+    # DM通知
     try:
         await member.send(
             f"⚠️ **{guild.name}** で自動タイムアウトされました。\n"
@@ -182,8 +147,8 @@ async def punish_automod(member: discord.Member, guild: discord.Guild, channel: 
         )
     except (discord.errors.Forbidden, discord.errors.HTTPException):
         pass
-    await log_action(guild, f"🔨 自動タイムアウト {TIMEOUT_MINUTES}分", member, detail)
 
+    await log_action(guild, f"🔨 自動タイムアウト {TIMEOUT_MINUTES}分", member, detail)
 
 # ===========================
 # ===== AutoMod =====
@@ -194,6 +159,7 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
+    # スタッフは全てスキップ
     staff_role = message.guild.get_role(ADMIN_ROLE_ID)
     if staff_role in message.author.roles or message.author.guild_permissions.administrator:
         await bot.process_commands(message)
@@ -201,15 +167,16 @@ async def on_message(message: discord.Message):
 
     text = message.content.strip()
 
+    # 許可URLのみのメッセージは長文・複数人スパム検知をスキップ
     import re as _re
     _urls = _re.findall(r'https?://([^\s/]+)', text)
-    _has_any_url = bool(_urls) or bool(_re.search(r'discord\.gg/[^\s]+|discord\.com/invite/[^\s]+', text, _re.IGNORECASE))
     _is_allowed_url_only = bool(_urls) and all(
         any(d.lower().replace("www.", "") == a or d.lower().replace("www.", "").endswith("." + a) for a in ALLOWED_DOMAINS)
         for d in _urls
     )
 
-    if text and not _is_allowed_url_only and not _has_any_url:
+    # 添付ファイルのみはスキップ
+    if text and not _is_allowed_url_only:
         # 長文チェック
         stripped = text.replace(" ", "").replace("\n", "").replace("\u3000", "")
         if len(stripped) > MAX_MESSAGE_LENGTH or len(text) > MAX_MESSAGE_LENGTH:
@@ -281,41 +248,25 @@ async def on_message(message: discord.Message):
 
     # URLフィルター
     url_pattern = re.compile(r'https?://([^\s/]+)')
-    invite_pattern = re.compile(r'discord\.gg/[^\s]+|discord\.com/invite/[^\s]+', re.IGNORECASE)
-    markdown_url_pattern = re.compile(r'\[.+?\]\(https?://([^\s/\)]+)')
-
     urls = url_pattern.findall(message.content)
-    markdown_urls = markdown_url_pattern.findall(message.content)
-    has_invite = bool(invite_pattern.search(message.content))
-
-    blocked = False
-    blocked_domain = ""
-
-    for domain in urls + markdown_urls:
+    for domain in urls:
         domain = domain.lower().replace("www.", "")
         if not any(domain == a or domain.endswith("." + a) for a in ALLOWED_DOMAINS):
-            blocked = True
-            blocked_domain = domain
-            break
-
-    if has_invite:
-        blocked = True
-        blocked_domain = "discord.gg"
-
-    if blocked:
-        try:
             await message.delete()
-        except Exception:
-            pass
-        await punish_automod(message.author, message.guild, message.channel, "不正URL送信", f"不正なURLを送信しました: `{blocked_domain}`")
-        await log_action(message.guild, "🔗 不正URLブロック", message.author, f"URL: `{blocked_domain}`")
-        return
+            await message.channel.send(
+                f"🔗 {message.author.mention} このリンクは許可されていません。",
+                delete_after=5
+            )
+            await log_action(message.guild, "🔗 不正URLブロック", message.author, f"URL: `{domain}`")
+            return
 
     # 悪言フィルター
     for word in BAD_WORDS:
         if word in message.content:
             await message.delete()
-            count = add_warn(message.author.id)
+            warn_tracker[message.author.id] = warn_tracker.get(message.author.id, 0) + 1
+            count = warn_tracker[message.author.id]
+            save_warns()
             await message.channel.send(
                 f"⚠️ {message.author.mention} 禁止ワードが含まれています。(警告 {count}回目)",
                 delete_after=5
@@ -332,7 +283,9 @@ async def on_message(message: discord.Message):
 
     if len(spam_tracker[user_id]) >= SPAM_LIMIT:
         spam_tracker[user_id] = []
-        count = add_warn(user_id)
+        warn_tracker[user_id] = warn_tracker.get(user_id, 0) + 1
+        count = warn_tracker[user_id]
+        save_warns()
         await message.channel.send(
             f"⚠️ {message.author.mention} スパムを検知しました。(警告 {count}回目)",
             delete_after=5
@@ -352,52 +305,6 @@ async def auto_punish(member: discord.Member, guild: discord.Guild, count: int):
 
 
 # ===========================
-# ===== メッセージ編集検知 =====
-# ===========================
-
-@bot.event
-async def on_message_edit(before: discord.Message, after: discord.Message):
-    if after.author.bot:
-        return
-    if not after.guild:
-        return
-
-    staff_role = after.guild.get_role(ADMIN_ROLE_ID)
-    if staff_role in after.author.roles or after.author.guild_permissions.administrator:
-        return
-
-    text = after.content.strip()
-    url_pattern = re.compile(r'https?://([^\s/]+)')
-    invite_pattern = re.compile(r'discord\.gg/[^\s]+|discord\.com/invite/[^\s]+', re.IGNORECASE)
-    markdown_url_pattern = re.compile(r'\[.+?\]\(https?://([^\s/\)]+)')
-
-    urls = url_pattern.findall(text)
-    markdown_urls = markdown_url_pattern.findall(text)
-    has_invite = bool(invite_pattern.search(text))
-
-    blocked = False
-    blocked_domain = ""
-
-    for domain in urls + markdown_urls:
-        domain = domain.lower().replace("www.", "")
-        if not any(domain == a or domain.endswith("." + a) for a in ALLOWED_DOMAINS):
-            blocked = True
-            blocked_domain = domain
-            break
-
-    if has_invite:
-        blocked = True
-        blocked_domain = "discord.gg"
-
-    if blocked:
-        try:
-            await after.delete()
-        except Exception:
-            pass
-        await log_action(after.guild, "🔗 編集による不正URLブロック", after.author, f"URL: `{blocked_domain}`")
-
-
-# ===========================
 # ===== レイド検知 =====
 # ===========================
 
@@ -405,8 +312,11 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
 async def on_member_join(member: discord.Member):
     now = datetime.now(timezone.utc).timestamp()
     join_tracker.append(now)
+
+    # 古いエントリを削除
     join_tracker[:] = [t for t in join_tracker if now - t < RAID_JOIN_INTERVAL]
 
+    # 新規アカウント検知
     account_age = (datetime.now(timezone.utc) - member.created_at).days
     if account_age < RAID_ACCOUNT_AGE_DAYS:
         await log_action(
@@ -416,6 +326,7 @@ async def on_member_join(member: discord.Member):
             f"アカウント作成から {account_age} 日 | 要注意ユーザーの可能性があります"
         )
 
+    # レイド検知
     if len(join_tracker) >= RAID_JOIN_LIMIT:
         join_tracker.clear()
         log_channel = member.guild.get_channel(get_log_channel_id())
@@ -438,7 +349,9 @@ async def on_member_join(member: discord.Member):
 @app_commands.describe(member="警告するユーザー", reason="理由")
 @app_commands.checks.has_permissions(administrator=True)
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "理由なし"):
-    count = add_warn(member.id)
+    warn_tracker[member.id] = warn_tracker.get(member.id, 0) + 1
+    count = warn_tracker[member.id]
+    save_warns()
     await interaction.response.send_message(f"⚠️ {member.mention} に警告を出しました。({count}回目)\n理由: {reason}")
     await log_action(interaction.guild, "⚠️ 警告", member, f"理由: {reason} | 合計{count}回")
     await auto_punish(member, interaction.guild, count)
@@ -448,17 +361,18 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 @app_commands.describe(member="確認するユーザー")
 @app_commands.checks.has_permissions(administrator=True)
 async def warns(interaction: discord.Interaction, member: discord.Member):
-    count = get_warns(member.id)
+    count = warn_tracker.get(member.id, 0)
     await interaction.response.send_message(f"📋 {member.mention} の警告数: **{count}回**", ephemeral=True)
 
 
-@bot.tree.command(name="clearwarn", description="ユーザーの警告を指定した数だけ減らします（スタッフのみ）")
-@app_commands.describe(member="対象ユーザー", amount="減らす警告数（省略すると1）")
+@bot.tree.command(name="clearwarn", description="ユーザーの警告をリセットします（スタッフのみ）")
+@app_commands.describe(member="リセットするユーザー")
 @app_commands.checks.has_permissions(administrator=True)
-async def clearwarn(interaction: discord.Interaction, member: discord.Member, amount: int = 1):
-    new_count = remove_warns(member.id, amount)
-    await interaction.response.send_message(f"✅ {member.mention} の警告を{amount}個減らしました。（現在: {new_count}回）", ephemeral=True)
-    await log_action(interaction.guild, "🔄 警告減少", member, f"{amount}個減らしました | 残り{new_count}回 | 実行者: {interaction.user}")
+async def clearwarn(interaction: discord.Interaction, member: discord.Member):
+    warn_tracker[member.id] = 0
+    save_warns()
+    await interaction.response.send_message(f"✅ {member.mention} の警告をリセットしました。", ephemeral=True)
+    await log_action(interaction.guild, "🔄 警告リセット", member, f"実行者: {interaction.user}")
 
 
 @bot.tree.command(name="kick", description="ユーザーをキックします（スタッフのみ）")
@@ -507,6 +421,7 @@ async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, 
 # ===========================
 
 async def log_action(guild: discord.Guild, action: str, user, detail: str = ""):
+    """モデレーションログ（警告・キック・BAN・AutoModなど）"""
     ch_id = get_mod_log_channel_id()
     log_channel = guild.get_channel(ch_id) if ch_id else None
     if not log_channel:
@@ -521,6 +436,7 @@ async def log_action(guild: discord.Guild, action: str, user, detail: str = ""):
 
 
 async def log_ticket(guild: discord.Guild, embed: discord.Embed, file=None):
+    """チケットログ専用"""
     ch_id = get_log_channel_id()
     log_channel = guild.get_channel(ch_id) if ch_id else None
     if not log_channel:
@@ -565,7 +481,11 @@ async def url_list(interaction: discord.Interaction):
         await interaction.response.send_message("📋 許可されているドメインはありません。", ephemeral=True)
         return
     domain_list = "\n".join([f"・{d}" for d in ALLOWED_DOMAINS])
-    embed = discord.Embed(title="🔗 許可URLドメイン一覧", description=domain_list, color=discord.Color.green())
+    embed = discord.Embed(
+        title="🔗 許可URLドメイン一覧",
+        description=domain_list,
+        color=discord.Color.green()
+    )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -602,7 +522,11 @@ async def badword_list(interaction: discord.Interaction):
         await interaction.response.send_message("📋 禁止ワードは登録されていません。", ephemeral=True)
         return
     word_list = "\n".join([f"・{w}" for w in BAD_WORDS])
-    embed = discord.Embed(title="🚫 禁止ワード一覧", description=word_list, color=discord.Color.red())
+    embed = discord.Embed(
+        title="🚫 禁止ワード一覧",
+        description=word_list,
+        color=discord.Color.red()
+    )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -626,6 +550,7 @@ async def setup(
     mod_log: discord.TextChannel = None
 ):
     if not any([ticket_category, auth_category, ticket_log, mod_log]):
+        # 何も指定されていなければ現在の設定を表示
         guild = interaction.guild
         cat = guild.get_channel(config.get("ticket_category_id")) if config.get("ticket_category_id") else None
         auth_cat = guild.get_channel(config.get("auth_category_id")) if config.get("auth_category_id") else None
@@ -663,7 +588,6 @@ async def setup(
 # ===========================
 
 class TicketPanelView(discord.ui.View):
-    """サポート・質問チケット単体パネル"""
     def __init__(self):
         super().__init__(timeout=None)
 
@@ -671,15 +595,9 @@ class TicketPanelView(discord.ui.View):
     async def ticket_support(self, interaction: discord.Interaction, button: discord.ui.Button):
         await create_ticket(interaction, "support", "サポート・質問")
 
-
-class InquiryPanelView(discord.ui.View):
-    """お問い合わせチケット単体パネル"""
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="📩 お問い合わせ", style=discord.ButtonStyle.secondary, custom_id="ticket_inquiry")
-    async def ticket_inquiry(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await create_ticket(interaction, "inquiry", "お問い合わせ")
+    @discord.ui.button(label="📩 その他・お問い合わせ", style=discord.ButtonStyle.secondary, custom_id="ticket_other")
+    async def ticket_other(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await create_ticket(interaction, "inquiry", "その他・お問い合わせ")
 
 
 class AuthPanelView(discord.ui.View):
@@ -721,12 +639,7 @@ class TicketView(discord.ui.View):
         if log_channel:
             import io
             log_file = discord.File(fp=io.StringIO(log_text), filename=f"{channel.name}-{datetime.now().strftime('%Y%m%d%H%M%S')}.txt")
-            embed = discord.Embed(
-                title="📋 チケットログ",
-                description=f"チャンネル: `{channel.name}`\nクローズ者: {interaction.user.mention}",
-                color=discord.Color.orange(),
-                timestamp=datetime.now(timezone.utc)
-            )
+            embed = discord.Embed(title="📋 チケットログ", description=f"チャンネル: `{channel.name}`\nクローズ者: {interaction.user.mention}", color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
             await log_ticket(interaction.guild, embed, log_file)
 
         await asyncio.sleep(3)
@@ -736,22 +649,21 @@ class TicketView(discord.ui.View):
 async def create_ticket(interaction: discord.Interaction, ticket_type: str, label: str, auth: bool = False):
     guild = interaction.guild
     member = interaction.user
-
     if auth:
         category = guild.get_channel(get_auth_category_id())
         if category is None:
-            await interaction.response.send_message("❌ 認証チケット用カテゴリが未設定です。", ephemeral=True)
-            return
-    elif ticket_type == "inquiry":
-        cat_id = get_inquiry_category_id() or get_ticket_category_id()
-        category = guild.get_channel(cat_id)
-        if category is None:
-            await interaction.response.send_message("❌ お問い合わせチケット用カテゴリが未設定です。", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ 認証チケット用カテゴリが未設定です。管理者が `/setup-auth-category` で設定してください。",
+                ephemeral=True
+            )
             return
     else:
         category = guild.get_channel(get_ticket_category_id())
         if category is None:
-            await interaction.response.send_message("❌ チケット用カテゴリが未設定です。", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ チケット用カテゴリが未設定です。管理者が `/setup-ticket-category` で設定してください。",
+                ephemeral=True
+            )
             return
 
     existing = discord.utils.get(category.channels, name=f"{ticket_type}-{member.name.lower()}")
@@ -768,62 +680,36 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str, labe
     if admin_role:
         overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
-    channel = await guild.create_text_channel(
-        name=f"{ticket_type}-{member.name.lower()}",
-        category=category,
-        overwrites=overwrites,
-        topic=f"{label} | {member} ({member.id})"
-    )
-
+    channel = await guild.create_text_channel(name=f"{ticket_type}-{member.name.lower()}", category=category, overwrites=overwrites, topic=f"{label} | {member} ({member.id})")
     if auth:
-        mention_text = member.mention
+        mention_text = member.mention  # 認証チケットはスタッフメンションなし
+    else:
+        mention_text = f"{member.mention} {admin_role.mention}" if admin_role else member.mention
+    if auth:
         desc = (
             f"{member.mention} 認証リクエストを受け付けました。\n\n"
             f"⚠️ このチケットは管理者が管理しているためロールが着くまで遅くなる可能性があります。\n\n"
             f"チケットを閉じる場合は下のボタンを押してください（管理者のみ）。"
         )
     else:
-        mention_text = f"{member.mention} {admin_role.mention}" if admin_role else member.mention
         desc = (
             f"{member.mention} さん、チケットを作成しました！\n\n"
             f"**内容を詳しく教えてください。**\nスタッフが確認次第、対応いたします。\n\n"
             f"チケットを閉じる場合は下のボタンを押してください（管理者のみ）。"
         )
-
     embed = discord.Embed(title=f"🎫 {label}", description=desc, color=discord.Color.blue(), timestamp=datetime.now(timezone.utc))
     embed.set_footer(text=f"チケットID: {channel.id}")
     await channel.send(content=mention_text, embed=embed, view=TicketView())
     await interaction.response.send_message(f"✅ チケットを作成しました: {channel.mention}", ephemeral=True)
 
 
-@bot.tree.command(name="botstatus", description="Botの現在の設定を全員に表示します")
-async def botstatus(interaction: discord.Interaction):
-    guild = interaction.guild
-    cat_id = config.get("ticket_category_id")
-    auth_cat_id = config.get("auth_category_id")
-    log_id = config.get("log_channel_id")
-    mod_log_id = config.get("mod_log_channel_id")
-    category = guild.get_channel(cat_id) if cat_id else None
-    auth_cat = guild.get_channel(auth_cat_id) if auth_cat_id else None
-    log_ch = guild.get_channel(log_id) if log_id else None
-    mod_log_ch = guild.get_channel(mod_log_id) if mod_log_id else None
-    embed = discord.Embed(title="\U0001f916 Bot設定状況", color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc))
-    embed.add_field(name="\U0001f3ab チケットカテゴリ", value=category.name if category else "\u274c 未設定", inline=True)
-    embed.add_field(name="\U0001f511 認証チケットカテゴリ", value=auth_cat.name if auth_cat else "\u274c 未設定", inline=True)
-    embed.add_field(name="\U0001f4cb チケットログ", value=log_ch.mention if log_ch else "\u274c 未設定", inline=True)
-    embed.add_field(name="\U0001f528 モデレーションログ", value=mod_log_ch.mention if mod_log_ch else "チケットログと共用", inline=True)
-    embed.add_field(name="\U0001f6e1️ AutoMod設定", value=f"長文検知: **{MAX_MESSAGE_LENGTH}文字**以上\n改行スパム: **{MAX_NEWLINES}回**以上\n連続スパム: **{SPAM_COUNT}回**連続\n複数垂スパム: **{CONTENT_SPAM_SECONDS}秒**以内に**{CONTENT_SPAM_USERS}人**\n自動TO: **{TIMEOUT_MINUTES}分**", inline=False)
-    domain_list = "\n".join([f"・{d}" for d in ALLOWED_DOMAINS]) if ALLOWED_DOMAINS else "なし"
-    embed.add_field(name="\U0001f517 許可URL", value=domain_list, inline=False)
-    word_list = "　".join([f"`{w}`" for w in BAD_WORDS]) if BAD_WORDS else "なし"
-    embed.add_field(name="\U0001f6ab 禁止ワード", value=word_list, inline=False)
-    embed.add_field(name="\u26a0️ 警告システム", value="3回 → 5分TO　5回 → 30分TO　7回以上 → 1時間TO", inline=False)
-    await interaction.response.send_message(embed=embed)
-
-
 @bot.tree.command(name="auth-panel", description="認証リクエストパネルを送信します（管理者のみ）")
+@app_commands.describe(category="認証チケット用カテゴリ（省略で現在の設定を使用）")
 @app_commands.checks.has_permissions(administrator=True)
-async def send_auth_panel(interaction: discord.Interaction):
+async def send_auth_panel(interaction: discord.Interaction, category: discord.CategoryChannel = None):
+    if category:
+        config["auth_category_id"] = category.id
+        save_config(config)
     embed = discord.Embed(
         title="🔑 認証リクエスト",
         description="認証ができない方はボタンを押してリクエストを送ってください。\n\n🔑 **認証リクエスト** — 認証ができない方向けのサポート",
@@ -834,29 +720,59 @@ async def send_auth_panel(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="ticket-panel", description="サポートチケットパネルを送信します（管理者のみ）")
+@app_commands.describe(category="サポートチケット用カテゴリ（省略で現在の設定を使用）")
 @app_commands.checks.has_permissions(administrator=True)
-async def send_panel(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🎫 サポートチケット",
-        description="❓ **サポート・質問** — サーバーに関する質問・サポート",
-        color=discord.Color.blurple()
-    )
+async def send_panel(interaction: discord.Interaction, category: discord.CategoryChannel = None):
+    if category:
+        config["ticket_category_id"] = category.id
+        save_config(config)
+    embed = discord.Embed(title="🎫 サポートチケット", description="❓ **サポート・質問** — サーバーに関する質問・サポート", color=discord.Color.blurple())
     await interaction.channel.send(embed=embed, view=TicketPanelView())
     await interaction.response.send_message("✅ パネルを送信しました。", ephemeral=True)
 
 
 @bot.tree.command(name="inquiry-panel", description="お問い合わせパネルを送信します（管理者のみ）")
+@app_commands.describe(category="お問い合わせチケット用カテゴリ（省略で現在の設定を使用）")
 @app_commands.checks.has_permissions(administrator=True)
-async def send_inquiry_panel(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📩 お問い合わせ",
-        description="📩 **お問い合わせ** — その他のお問い合わせはこちら",
-        color=discord.Color.blurple()
-    )
+async def send_inquiry_panel(interaction: discord.Interaction, category: discord.CategoryChannel = None):
+    if category:
+        config["inquiry_category_id"] = category.id
+        save_config(config)
+    embed = discord.Embed(title="📩 お問い合わせ", description="📩 **お問い合わせ** — その他のお問い合わせはこちら", color=discord.Color.blurple())
     await interaction.channel.send(embed=embed, view=InquiryPanelView())
     await interaction.response.send_message("✅ お問い合わせパネルを送信しました。", ephemeral=True)
 
 
+@bot.tree.command(name="botstatus", description="Botの現在の設定を全員に表示します")
+async def botstatus(interaction: discord.Interaction):
+    guild = interaction.guild
+    cat_id = config.get("ticket_category_id")
+    auth_cat_id = config.get("auth_category_id")
+    inq_cat_id = config.get("inquiry_category_id")
+    log_id = config.get("log_channel_id")
+    mod_log_id = config.get("mod_log_channel_id")
+    category = guild.get_channel(cat_id) if cat_id else None
+    auth_cat = guild.get_channel(auth_cat_id) if auth_cat_id else None
+    inq_cat = guild.get_channel(inq_cat_id) if inq_cat_id else None
+    log_ch = guild.get_channel(log_id) if log_id else None
+    mod_log_ch = guild.get_channel(mod_log_id) if mod_log_id else None
+    embed = discord.Embed(title="🤖 Bot設定状況", color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc))
+    embed.add_field(name="🎫 サポートカテゴリ", value=category.name if category else "❌ 未設定", inline=True)
+    embed.add_field(name="📩 お問い合わせカテゴリ", value=inq_cat.name if inq_cat else "❌ 未設定", inline=True)
+    embed.add_field(name="🔑 認証カテゴリ", value=auth_cat.name if auth_cat else "❌ 未設定", inline=True)
+    embed.add_field(name="📋 チケットログ", value=log_ch.mention if log_ch else "❌ 未設定", inline=True)
+    embed.add_field(name="🔨 モデレーションログ", value=mod_log_ch.mention if mod_log_ch else "チケットログと共用", inline=True)
+    embed.add_field(name="🛡️ AutoMod設定", value=f"長文: **{MAX_MESSAGE_LENGTH}文字**以上 / 改行: **{MAX_NEWLINES}回**以上 / 連続: **{SPAM_COUNT}回** / 複数垢: **{CONTENT_SPAM_SECONDS}秒**に**{CONTENT_SPAM_USERS}人** / TO: **{TIMEOUT_MINUTES}分**", inline=False)
+    domain_list = "\n".join([f"・{d}" for d in ALLOWED_DOMAINS]) if ALLOWED_DOMAINS else "なし"
+    embed.add_field(name="🔗 許可URL", value=domain_list, inline=False)
+    word_list = "　".join([f"`{w}`" for w in BAD_WORDS]) if BAD_WORDS else "なし"
+    embed.add_field(name="🚫 禁止ワード", value=word_list, inline=False)
+    embed.add_field(name="⚠️ 警告", value="3回→5分TO / 5回→30分TO / 7回以上→1時間TO", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+
+# ===========================
 # ===========================
 # ===== バックアップ・復元 =====
 # ===========================
@@ -867,6 +783,7 @@ async def backup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
 
+    # ロール保存
     roles = []
     for role in guild.roles:
         if role.is_default():
@@ -880,6 +797,7 @@ async def backup(interaction: discord.Interaction):
             "position": role.position,
         })
 
+    # カテゴリ・チャンネル保存
     categories = []
     no_category_channels = []
 
@@ -916,6 +834,7 @@ async def backup(interaction: discord.Interaction):
         "no_category_channels": no_category_channels,
     }
 
+    # JSONファイルとして保存
     filename = f"backup-{guild.id}-{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
     json_bytes = json.dumps(backup_data, ensure_ascii=False, indent=2).encode("utf-8")
     file = discord.File(fp=io.BytesIO(json_bytes), filename=filename)
@@ -958,6 +877,7 @@ async def restore(interaction: discord.Interaction, file: discord.Attachment):
 
     results = []
 
+    # ロール復元
     existing_role_names = {r.name for r in guild.roles}
     created_roles = 0
     for role_data in sorted(data.get("roles", []), key=lambda r: r["position"]):
@@ -977,11 +897,13 @@ async def restore(interaction: discord.Interaction, file: discord.Attachment):
             pass
     results.append(f"✅ ロール: {created_roles}個作成")
 
+    # カテゴリ・チャンネル復元
     existing_channel_names = {c.name for c in guild.channels}
     created_categories = 0
     created_channels = 0
 
     for cat_data in sorted(data.get("categories", []), key=lambda c: c["position"]):
+        # カテゴリ作成
         if cat_data["name"] not in existing_channel_names:
             try:
                 category = await guild.create_category(name=cat_data["name"])
@@ -995,6 +917,7 @@ async def restore(interaction: discord.Interaction, file: discord.Attachment):
         if category is None:
             continue
 
+        # チャンネル作成
         for ch_data in sorted(cat_data.get("channels", []), key=lambda c: c["position"]):
             if ch_data["name"] in existing_channel_names:
                 continue
@@ -1008,7 +931,10 @@ async def restore(interaction: discord.Interaction, file: discord.Attachment):
                         slowmode_delay=ch_data.get("slowmode_delay", 0),
                     )
                 elif ch_data["type"] == "voice":
-                    await guild.create_voice_channel(name=ch_data["name"], category=category)
+                    await guild.create_voice_channel(
+                        name=ch_data["name"],
+                        category=category,
+                    )
                 created_channels += 1
                 await asyncio.sleep(0.5)
             except Exception:
@@ -1028,17 +954,21 @@ async def restore(interaction: discord.Interaction, file: discord.Attachment):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+# ===== Bot起動時 =====
 # ===========================
-# ===== チケット自動削除 =====
+
 # ===========================
+# ===== 認証チケット自動削除 =====
+# ===========================
+
+TICKET_TIMEOUT_MINUTES = 5   # 通常チケット: 5分
+AUTH_TICKET_TIMEOUT_HOURS = 0.083  # 認証チケット: 5分（=5/60時間）
 
 @bot.event
 async def on_ready():
-    init_db()
-    check_tickets.start()
+    check_auth_tickets.start()
     auto_backup.start()
     bot.add_view(TicketPanelView())
-    bot.add_view(InquiryPanelView())
     bot.add_view(AuthPanelView())
     bot.add_view(TicketView())
     try:
@@ -1050,40 +980,36 @@ async def on_ready():
 
 
 @tasks.loop(minutes=2)
-async def check_tickets():
-    """全チケット種別: 人間のメッセージがなければ5分で自動削除"""
+async def check_auth_tickets():
+    """チケットを10分応答がなければ自動削除"""
+    from datetime import timedelta, timezone as tz
     auth_cat_id = config.get("auth_category_id")
     ticket_cat_id = config.get("ticket_category_id")
-    inquiry_cat_id = config.get("inquiry_category_id") or ticket_cat_id
-
-    # チェック対象: (カテゴリID, チャンネル名プレフィックス)
-    targets = []
-    if auth_cat_id:
-        targets.append((auth_cat_id, "auth-request-"))
-    if ticket_cat_id:
-        targets.append((ticket_cat_id, "support-"))
-    if inquiry_cat_id and inquiry_cat_id != ticket_cat_id:
-        targets.append((inquiry_cat_id, "inquiry-"))
-    elif inquiry_cat_id == ticket_cat_id and ticket_cat_id:
-        # 同じカテゴリの場合はinquiry-も対象に追加
-        targets.append((ticket_cat_id, "inquiry-"))
 
     for guild in bot.guilds:
-        for cat_id, prefix in targets:
-            category = guild.get_channel(cat_id)
-            if not category:
-                continue
-            for channel in list(category.text_channels):
-                if not channel.name.startswith(prefix):
-                    continue
-                has_human_msg = False
-                async for msg in channel.history(limit=50):
-                    if not msg.author.bot:
-                        has_human_msg = True
-                        break
-                if has_human_msg:
-                    continue
-                await _auto_delete_ticket(guild, channel, minutes=5)
+        # 認証チケット（10分）
+        if auth_cat_id:
+            category = guild.get_channel(auth_cat_id)
+            if category:
+                for channel in list(category.text_channels):
+                    if not channel.name.startswith("auth-request-"):
+                        continue
+                    # 人間のメッセージがあれば削除しない
+                    has_human_msg = False
+                    async for msg in channel.history(limit=50):
+                        if not msg.author.bot:
+                            has_human_msg = True
+                            break
+                    if has_human_msg:
+                        continue
+                    await _auto_delete_ticket(guild, channel, minutes=5)
+
+        # 通常チケット（5分）
+        if ticket_cat_id:
+            category = guild.get_channel(ticket_cat_id)
+            if category:
+                for channel in list(category.text_channels):
+                    await _auto_delete_ticket(guild, channel, minutes=5)
 
 
 async def _auto_delete_ticket(guild, channel, minutes: int):
@@ -1091,11 +1017,16 @@ async def _auto_delete_ticket(guild, channel, minutes: int):
     from datetime import timezone as tz
     try:
         now = datetime.now(tz.utc)
+        # チャンネル作成から指定分数経過していなければスキップ
         if (now - channel.created_at).total_seconds() < minutes * 60:
             return
+
+        # 人間のメッセージが1件でもあれば削除しない
         async for msg in channel.history(limit=50):
             if not msg.author.bot:
-                return
+                return  # 人間のメッセージあり → 削除しない
+
+        # Bot発言のみ & 時間経過 → 削除
         await _delete_and_log(guild, channel, minutes)
     except Exception:
         pass
@@ -1119,12 +1050,14 @@ async def _delete_and_log(guild, channel, minutes: int):
 # ===========================
 
 BACKUP_FILE = "backup.json"
+BACKUP_INTERVAL_HOURS = 24  # 自動バックアップの間隔（時間）
 
 def save_backup(data: dict):
     with open(BACKUP_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 async def create_backup(guild: discord.Guild) -> dict:
+    """サーバーのチャンネル構成とロールをバックアップ"""
     backup = {
         "guild_name": guild.name,
         "guild_id": guild.id,
@@ -1132,6 +1065,8 @@ async def create_backup(guild: discord.Guild) -> dict:
         "roles": [],
         "categories": [],
     }
+
+    # ロール一覧（@everyoneを除く）
     for role in guild.roles:
         if role.name == "@everyone":
             continue
@@ -1143,8 +1078,14 @@ async def create_backup(guild: discord.Guild) -> dict:
             "permissions": role.permissions.value,
             "position": role.position,
         })
+
+    # カテゴリ＆チャンネル構成
     for category in guild.categories:
-        cat_data = {"name": category.name, "position": category.position, "channels": []}
+        cat_data = {
+            "name": category.name,
+            "position": category.position,
+            "channels": []
+        }
         for channel in category.channels:
             cat_data["channels"].append({
                 "name": channel.name,
@@ -1155,7 +1096,13 @@ async def create_backup(guild: discord.Guild) -> dict:
                 "slowmode": getattr(channel, "slowmode_delay", 0),
             })
         backup["categories"].append(cat_data)
-    no_category = {"name": "（カテゴリなし）", "position": -1, "channels": []}
+
+    # カテゴリなしチャンネル
+    no_category = {
+        "name": "（カテゴリなし）",
+        "position": -1,
+        "channels": []
+    }
     for channel in guild.channels:
         if channel.category is None and not isinstance(channel, discord.CategoryChannel):
             no_category["channels"].append({
@@ -1168,22 +1115,8 @@ async def create_backup(guild: discord.Guild) -> dict:
             })
     if no_category["channels"]:
         backup["categories"].append(no_category)
+
     return backup
 
-
-@tasks.loop(hours=24)
-async def auto_backup():
-    for guild in bot.guilds:
-        data = await create_backup(guild)
-        save_backup(data)
-        log_ch = guild.get_channel(get_mod_log_channel_id())
-        if log_ch:
-            embed = discord.Embed(
-                title="💾 自動バックアップ完了",
-                description=f"サーバー: **{guild.name}**\nロール・チャンネル構成を保存しました。",
-                color=discord.Color.green(),
-                timestamp=datetime.now(timezone.utc)
-            )
-            await log_ch.send(embed=embed)
 
 bot.run(TOKEN)
