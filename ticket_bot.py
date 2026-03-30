@@ -808,12 +808,13 @@ async def send_inquiry_panel(interaction: discord.Interaction, category: discord
 
 @bot.tree.command(name="botstatus", description="Botの現在の設定を全員に表示します")
 async def botstatus(interaction: discord.Interaction):
+    await interaction.response.defer()
     guild = interaction.guild
-    cat_id = config.get("ticket_category_id")
-    auth_cat_id = config.get("auth_category_id")
-    inq_cat_id = config.get("inquiry_category_id")
-    log_id = config.get("log_channel_id")
-    mod_log_id = config.get("mod_log_channel_id")
+    cat_id = await get_ticket_category_id()
+    auth_cat_id = await get_auth_category_id()
+    inq_cat_id = await get_config("inquiry_category_id")
+    log_id = await get_log_channel_id()
+    mod_log_id = await get_mod_log_channel_id()
     category = guild.get_channel(cat_id) if cat_id else None
     auth_cat = guild.get_channel(auth_cat_id) if auth_cat_id else None
     inq_cat = guild.get_channel(inq_cat_id) if inq_cat_id else None
@@ -831,7 +832,7 @@ async def botstatus(interaction: discord.Interaction):
     word_list = "　".join([f"`{w}`" for w in BAD_WORDS]) if BAD_WORDS else "なし"
     embed.add_field(name="🚫 禁止ワード", value=word_list, inline=False)
     embed.add_field(name="⚠️ 警告", value="3回→5分TO / 5回→30分TO / 7回以上→1時間TO", inline=False)
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 
 
