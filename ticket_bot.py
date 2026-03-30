@@ -614,6 +614,18 @@ async def setup(
     if backup_channel:
         await set_config("backup_channel_id", backup_channel.id)
         changed.append(f"💾 バックアップチャンネル → {backup_channel.mention}")
+        # 設定した瞬間に即バックアップを送信
+        data = await create_backup(interaction.guild)
+        filename = f"backup-{interaction.guild.id}-{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
+        json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        file = discord.File(fp=io.BytesIO(json_bytes), filename=filename)
+        embed_bk = discord.Embed(
+            title="💾 バックアップ開始",
+            description="バックアップチャンネルを設定しました。これより1時間ごとに自動バックアップを送信します。",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        await backup_channel.send(embed=embed_bk, file=file)
 
     embed = discord.Embed(title="✅ 設定を更新しました", description="\n".join(changed), color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
