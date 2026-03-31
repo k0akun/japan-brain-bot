@@ -205,7 +205,7 @@ async def punish_automod(member: discord.Member, guild: discord.Guild, channel: 
     except (discord.errors.Forbidden, discord.errors.HTTPException):
         pass
 
-    await log_action(guild, f"🔨 自動タイムアウト {TIMEOUT_MINUTES}分", member, detail)
+    await log_action(guild, f"🔨 自動タイムアウト {TIMEOUT_MINUTES}分", member, f"{detail} | 実行者: AutoMod")
 
 # ===========================
 # ===== AutoMod =====
@@ -307,7 +307,7 @@ async def on_message(message: discord.Message):
                         await message.channel.purge(limit=20, check=lambda msg, u=uid: msg.author.id == u, bulk=True)
                     except Exception:
                         pass
-            await log_action(message.guild, "🚨 複数アカウントスパム検知", message.author, f"対象ID: {guilty_ids}")
+            await log_action(message.guild, "🚨 複数アカウントスパム検知", message.author, f"対象ID: {guilty_ids} | 実行者: AutoMod")
             return
 
     # URLフィルター
@@ -365,21 +365,21 @@ async def auto_punish(member: discord.Member, guild: discord.Guild, count: int):
     if count == 3:
         try:
             await member.timeout(discord.utils.utcnow() + timedelta(minutes=5), reason="警告3回（AutoMod）")
-            await log_action(guild, "⏱️ タイムアウト5分", member, "警告3回に達したため")
+            await log_action(guild, "⏱️ タイムアウト5分", member, "警告3回に達したため | 実行者: AutoMod")
         except (discord.errors.Forbidden, discord.errors.HTTPException):
-            await log_action(guild, "⚠️ タイムアウト失敗", member, "権限不足のためタイムアウトできませんでした")
+            await log_action(guild, "⚠️ タイムアウト失敗", member, "権限不足のためタイムアウトできませんでした | 実行者: AutoMod")
     elif count == 5:
         try:
             await member.timeout(discord.utils.utcnow() + timedelta(minutes=30), reason="警告5回（AutoMod）")
-            await log_action(guild, "⏱️ タイムアウト30分", member, "警告5回に達したため")
+            await log_action(guild, "⏱️ タイムアウト30分", member, "警告5回に達したため | 実行者: AutoMod")
         except (discord.errors.Forbidden, discord.errors.HTTPException):
-            await log_action(guild, "⚠️ タイムアウト失敗", member, "権限不足のためタイムアウトできませんでした")
+            await log_action(guild, "⚠️ タイムアウト失敗", member, "権限不足のためタイムアウトできませんでした | 実行者: AutoMod")
     elif count >= 7:
         try:
             await member.timeout(discord.utils.utcnow() + timedelta(hours=1), reason="警告7回以上（AutoMod）")
-            await log_action(guild, "⏱️ タイムアウト1時間", member, "警告7回以上に達したため")
+            await log_action(guild, "⏱️ タイムアウト1時間", member, "警告7回以上に達したため | 実行者: AutoMod")
         except (discord.errors.Forbidden, discord.errors.HTTPException):
-            await log_action(guild, "⚠️ タイムアウト失敗", member, "権限不足のためタイムアウトできませんでした")
+            await log_action(guild, "⚠️ タイムアウト失敗", member, "権限不足のためタイムアウトできませんでした | 実行者: AutoMod")
 
 
 # ===========================
@@ -431,7 +431,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
     count = await get_warns(member.id) + 1
     await set_warns(member.id, count)
     await interaction.response.send_message(f"⚠️ {member.mention} に警告を出しました。({count}回目)\n理由: {reason}")
-    await log_action(interaction.guild, "⚠️ 警告", member, f"理由: {reason} | 合計{count}回")
+    await log_action(interaction.guild, "⚠️ 警告", member, f"理由: {reason} | 合計{count}回 | 実行者: {interaction.user}")
     await auto_punish(member, interaction.guild, count)
 
 
@@ -475,13 +475,32 @@ async def warns(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.send_message(f"📋 {member.mention} の警告数: **{count}回**", ephemeral=True)
 
 
-@bot.tree.command(name="clearwarn", description="ユーザーの警告をリセットします（スタッフのみ）")
-@app_commands.describe(member="リセットするユーザー")
+@bot.tree.command(name="clearwarn", description="ユーザーの警告を減らします（スタッフのみ）省略時はリセット")
+@app_commands.describe(member="対象ユーザー", count="減らす回数（省略時はリセット）")
 @staff_check()
-async def clearwarn(interaction: discord.Interaction, member: discord.Member):
-    await reset_warns(member.id)
-    await interaction.response.send_message(f"✅ {member.mention} の警告をリセットしました。", ephemeral=True)
-    await log_action(interaction.guild, "🔄 警告リセット", member, f"実行者: {interaction.user}")
+async def clearwarn(interaction: discord.Interaction, member: discord.Member, count: int = None):
+    current = await get_warns(member.id)
+    if count is None:
+        # 省略時：完全リセット
+        await reset_warns(member.id)
+        await interaction.response.send_message(
+            f"✅ {member.mention} の警告をリセットしました。({current}回 → 0回)",
+            ephemeral=True
+        )
+        await log_action(interaction.guild, "🔄 警告リセット", member,
+                         f"実行者: {interaction.user} | {current}回 → 0回")
+    else:
+        if count <= 0:
+            await interaction.response.send_message("❌ 1以上の回数を指定してください。", ephemeral=True)
+            return
+        new_count = max(current - count, 0)
+        await set_warns(member.id, new_count)
+        await interaction.response.send_message(
+            f"✅ {member.mention} の警告を {count}回 減らしました。({current}回 → {new_count}回)",
+            ephemeral=True
+        )
+        await log_action(interaction.guild, "🔽 警告減算", member,
+                         f"実行者: {interaction.user} | {current}回 → {new_count}回（{count}回減算）")
 
 
 @bot.tree.command(name="kick", description="ユーザーをキックします（スタッフのみ）")
@@ -1236,16 +1255,16 @@ async def on_ready():
 async def check_auth_tickets():
     auth_cat_id = await get_auth_category_id()
     ticket_cat_id = await get_ticket_category_id()
+    inquiry_cat_id = await get_config("inquiry_category_id")
 
     for guild in bot.guilds:
-        # 認証チケット（10分）
+        # 認証チケット（5分・人間のメッセージがなければ削除）
         if auth_cat_id:
             category = guild.get_channel(auth_cat_id)
             if category:
                 for channel in list(category.text_channels):
                     if not channel.name.startswith("auth-request-"):
                         continue
-                    # 人間のメッセージがあれば削除しない（全履歴チェック）
                     has_human_msg = False
                     async for msg in channel.history(limit=None):
                         if not msg.author.bot:
@@ -1255,12 +1274,25 @@ async def check_auth_tickets():
                         continue
                     await _auto_delete_ticket(guild, channel, minutes=5)
 
-        # 通常チケット（5分）
+        # サポート・質問チケット（5分）
         if ticket_cat_id:
             category = guild.get_channel(ticket_cat_id)
             if category:
                 for channel in list(category.text_channels):
-                    # 人間のメッセージが1件でもあれば削除しない
+                    has_human_msg = False
+                    async for msg in channel.history(limit=None):
+                        if not msg.author.bot:
+                            has_human_msg = True
+                            break
+                    if has_human_msg:
+                        continue
+                    await _auto_delete_ticket(guild, channel, minutes=5)
+
+        # お問い合わせチケット（5分）※サポートと別カテゴリの場合のみ対象
+        if inquiry_cat_id and inquiry_cat_id != ticket_cat_id:
+            category = guild.get_channel(inquiry_cat_id)
+            if category:
+                for channel in list(category.text_channels):
                     has_human_msg = False
                     async for msg in channel.history(limit=None):
                         if not msg.author.bot:
