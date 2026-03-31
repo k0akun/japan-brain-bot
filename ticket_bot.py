@@ -869,6 +869,14 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str, labe
         if category is None:
             await interaction.response.send_message("❌ 認証チケット用カテゴリが未設定です。`/setup` で設定してください。", ephemeral=True)
             return
+    elif ticket_type == "inquiry":
+        cat_id = await get_config("inquiry_category_id")
+        if not cat_id:
+            cat_id = await get_ticket_category_id()
+        category = guild.get_channel(cat_id) if cat_id else None
+        if category is None:
+            await interaction.response.send_message("❌ お問い合わせ用カテゴリが未設定です。`/ticket-panel` で設定してください。", ephemeral=True)
+            return
     else:
         cat_id = await get_ticket_category_id()
         category = guild.get_channel(cat_id) if cat_id else None
@@ -931,7 +939,7 @@ async def send_auth_panel(interaction: discord.Interaction, category: discord.Ca
 @bot.tree.command(name="ticket-panel", description="サポート＆お問い合わせパネルを送信します（管理者のみ）")
 @app_commands.describe(
     support_category="サポート・質問チケット用カテゴリ",
-    inquiry_category="お問い合わせチケット用カテゴリ"
+    inquiry_category="お問い合わせチケット用カテゴリ（省略するとサポートカテゴリと同じになります）"
 )
 @staff_check()
 async def send_panel(interaction: discord.Interaction, support_category: discord.CategoryChannel = None, inquiry_category: discord.CategoryChannel = None):
@@ -939,6 +947,16 @@ async def send_panel(interaction: discord.Interaction, support_category: discord
         await set_config("ticket_category_id", support_category.id)
     if inquiry_category:
         await set_config("inquiry_category_id", inquiry_category.id)
+    elif support_category:
+        # inquiry_categoryが省略された場合、support_categoryと同じにはせず警告を出す
+        pass
+
+    # 現在の設定を確認して表示
+    s_cat_id = await get_ticket_category_id()
+    i_cat_id = await get_config("inquiry_category_id")
+    s_cat = interaction.guild.get_channel(s_cat_id) if s_cat_id else None
+    i_cat = interaction.guild.get_channel(i_cat_id) if i_cat_id else None
+
     embed = discord.Embed(
         title="🎫 サポートチケット",
         description=(
@@ -948,7 +966,18 @@ async def send_panel(interaction: discord.Interaction, support_category: discord
         color=discord.Color.blurple()
     )
     await interaction.channel.send(embed=embed, view=TicketPanelView())
-    await interaction.response.send_message("✅ パネルを送信しました。", ephemeral=True)
+
+    info = []
+    if s_cat:
+        info.append(f"✅ サポートカテゴリ: **{s_cat.name}**")
+    else:
+        info.append("⚠️ サポートカテゴリ: **未設定**")
+    if i_cat:
+        info.append(f"✅ お問い合わせカテゴリ: **{i_cat.name}**")
+    else:
+        info.append("⚠️ お問い合わせカテゴリ: **未設定**（`/ticket-panel inquiry_category:カテゴリ名` で設定してください）")
+
+    await interaction.response.send_message("✅ パネルを送信しました。\n" + "\n".join(info), ephemeral=True)
 
 
 @bot.tree.command(name="inquiry-panel", description="お問い合わせパネルを送信します（管理者のみ）")
