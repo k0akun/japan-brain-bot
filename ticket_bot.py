@@ -1216,9 +1216,9 @@ async def check_auth_tickets():
                 for channel in list(category.text_channels):
                     if not channel.name.startswith("auth-request-"):
                         continue
-                    # 人間のメッセージがあれば削除しない
+                    # 人間のメッセージがあれば削除しない（全履歴チェック）
                     has_human_msg = False
-                    async for msg in channel.history(limit=50):
+                    async for msg in channel.history(limit=None):
                         if not msg.author.bot:
                             has_human_msg = True
                             break
@@ -1231,11 +1231,19 @@ async def check_auth_tickets():
             category = guild.get_channel(ticket_cat_id)
             if category:
                 for channel in list(category.text_channels):
+                    # 人間のメッセージが1件でもあれば削除しない
+                    has_human_msg = False
+                    async for msg in channel.history(limit=None):
+                        if not msg.author.bot:
+                            has_human_msg = True
+                            break
+                    if has_human_msg:
+                        continue
                     await _auto_delete_ticket(guild, channel, minutes=5)
 
 
 async def _auto_delete_ticket(guild, channel, minutes: int):
-    """ユーザーのメッセージが一切なく、チャンネル作成から指定分数経過したら削除"""
+    """Botのメッセージのみ かつ チャンネル作成から指定分数経過した場合のみ削除"""
     from datetime import timezone as tz
     try:
         now = datetime.now(tz.utc)
@@ -1243,8 +1251,8 @@ async def _auto_delete_ticket(guild, channel, minutes: int):
         if (now - channel.created_at).total_seconds() < minutes * 60:
             return
 
-        # 人間のメッセージが1件でもあれば削除しない
-        async for msg in channel.history(limit=50):
+        # 全履歴をチェック（人間のメッセージが1件でもあれば絶対に削除しない）
+        async for msg in channel.history(limit=None):
             if not msg.author.bot:
                 return  # 人間のメッセージあり → 削除しない
 
