@@ -1373,6 +1373,7 @@ async def on_ready():
 
 @tasks.loop(minutes=2)
 async def check_auth_tickets():
+    print(f"[AutoDelete] チェック開始: {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
     auth_cat_id = await get_auth_category_id()
     ticket_cat_id = await get_ticket_category_id()
     inquiry_cat_id = await get_config("inquiry_category_id")
@@ -1385,13 +1386,6 @@ async def check_auth_tickets():
                 for channel in list(category.text_channels):
                     if not channel.name.startswith("auth-request-"):
                         continue
-                    has_human_msg = False
-                    async for msg in channel.history(limit=50):
-                        if not msg.author.bot:
-                            has_human_msg = True
-                            break
-                    if has_human_msg:
-                        continue
                     await _auto_delete_ticket(guild, channel, minutes=5)
 
         # サポート・質問チケット（5分）
@@ -1399,13 +1393,6 @@ async def check_auth_tickets():
             category = guild.get_channel(ticket_cat_id)
             if category:
                 for channel in list(category.text_channels):
-                    has_human_msg = False
-                    async for msg in channel.history(limit=50):
-                        if not msg.author.bot:
-                            has_human_msg = True
-                            break
-                    if has_human_msg:
-                        continue
                     await _auto_delete_ticket(guild, channel, minutes=5)
 
         # お問い合わせチケット（5分）※サポートと別カテゴリの場合のみ対象
@@ -1413,14 +1400,12 @@ async def check_auth_tickets():
             category = guild.get_channel(inquiry_cat_id)
             if category:
                 for channel in list(category.text_channels):
-                    has_human_msg = False
-                    async for msg in channel.history(limit=50):
-                        if not msg.author.bot:
-                            has_human_msg = True
-                            break
-                    if has_human_msg:
-                        continue
                     await _auto_delete_ticket(guild, channel, minutes=5)
+
+
+@check_auth_tickets.before_loop
+async def before_check_auth_tickets():
+    await bot.wait_until_ready()
 
 
 @check_auth_tickets.error
@@ -1435,19 +1420,24 @@ async def _auto_delete_ticket(guild, channel, minutes: int):
     from datetime import timezone as tz
     try:
         now = datetime.now(tz.utc)
+        elapsed = (now - channel.created_at).total_seconds()
+
         # チャンネル作成から指定分数経過していなければスキップ
-        if (now - channel.created_at).total_seconds() < minutes * 60:
+        if elapsed < minutes * 60:
+            print(f"[AutoDelete] スキップ（時間未達）: #{channel.name} ({int(elapsed)}秒経過 / {minutes*60}秒必要)")
             return
 
         # 全履歴をチェック（人間のメッセージが1件でもあれば絶対に削除しない）
         async for msg in channel.history(limit=None):
             if not msg.author.bot:
+                print(f"[AutoDelete] スキップ（人間メッセージあり）: #{channel.name}")
                 return  # 人間のメッセージあり → 削除しない
 
         # Bot発言のみ & 時間経過 → 削除
+        print(f"[AutoDelete] 削除実行: #{channel.name}")
         await _delete_and_log(guild, channel, minutes)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[AutoDelete] エラー: #{channel.name} → {e}")
 
 
 async def _delete_and_log(guild, channel, minutes: int):
