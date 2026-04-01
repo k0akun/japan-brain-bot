@@ -1307,6 +1307,28 @@ async def restore(interaction: discord.Interaction, file: discord.Attachment):
 TICKET_TIMEOUT_MINUTES = 5   # 通常チケット: 5分
 AUTH_TICKET_TIMEOUT_HOURS = 0.083  # 認証チケット: 5分（=5/60時間）
 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """スラッシュコマンド全体のエラーハンドラ"""
+    if isinstance(error, app_commands.TransformerError):
+        msg = "❌ ユーザーが見つかりません。サーバーにいるメンバーを指定してください。"
+    elif isinstance(error, app_commands.MissingPermissions):
+        msg = "❌ 権限が不足しています。"
+    elif isinstance(error, app_commands.CheckFailure):
+        # staff_check などで既にメッセージ送信済みの場合はスキップ
+        return
+    else:
+        msg = f"❌ エラーが発生しました: {type(error).__name__}"
+        print(f"[AppCommandError] {error}")
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass
+
+
 @bot.event
 async def on_ready():
     global BAD_WORDS, SPAM_IGNORE_IDS, EXEMPT_ROLE_IDS
