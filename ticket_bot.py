@@ -1364,8 +1364,6 @@ async def on_ready():
     bot.add_view(AuthPanelView())
     bot.add_view(TicketView())
     try:
-        # コマンドキャッシュを完全リセットして再登録
-        bot.tree.clear_commands(guild=None)
         synced = await bot.tree.sync()
         print(f"✅ スラッシュコマンドを同期しました ({len(synced)}個)")
     except Exception as e:
