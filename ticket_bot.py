@@ -447,9 +447,10 @@ async def on_member_join(member: discord.Member):
 @app_commands.describe(member="警告するユーザー", reason="理由")
 @staff_check()
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "理由なし"):
+    await interaction.response.defer()
     count = await get_warns(member.id) + 1
     await set_warns(member.id, count)
-    await interaction.response.send_message(f"⚠️ {member.mention} に警告を出しました。({count}回目)\n理由: {reason}")
+    await interaction.followup.send(f"⚠️ {member.mention} に警告を出しました。({count}回目)\n理由: {reason}")
     await log_action(interaction.guild, "⚠️ 警告", member, f"理由: {reason} | 合計{count}回 | 実行者: {interaction.user}")
     await auto_punish(member, interaction.guild, count)
 
@@ -691,7 +692,8 @@ async def badword_remove(interaction: discord.Interaction, word: str):
     await log_action(interaction.guild, "🗑️ 禁止ワード削除", interaction.user, f"削除ワード: `{word}`")
 
 
-@bot.tree.command(name="badword-list", description="禁止ワード一覧を表示します（全員閲覧可能）")
+@bot.tree.command(name="badword-list", description="禁止ワード一覧を表示します（スタッフのみ）")
+@staff_check()
 async def badword_list(interaction: discord.Interaction):
     if not BAD_WORDS:
         await interaction.response.send_message("📋 禁止ワードは登録されていません。")
@@ -933,7 +935,7 @@ class TicketView(discord.ui.View):
         log_text += f"クローズ日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         log_text += f"クローズ者: {interaction.user} ({interaction.user.id})\n\n"
 
-        async for msg in channel.history(limit=500, oldest_first=True):
+        async for msg in channel.history(limit=None, oldest_first=True):
             timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
             log_text += f"[{timestamp}] {msg.author}: {msg.content}\n"
             for attachment in msg.attachments:
@@ -943,7 +945,7 @@ class TicketView(discord.ui.View):
         log_channel = interaction.guild.get_channel(log_ch_id) if log_ch_id else None
         if log_channel:
             import io
-            log_file = discord.File(fp=io.StringIO(log_text), filename=f"{channel.name}-{datetime.now().strftime('%Y%m%d%H%M%S')}.txt")
+            log_file = discord.File(fp=io.BytesIO(log_text.encode("utf-8")), filename=f"{channel.name}-{datetime.now().strftime('%Y%m%d%H%M%S')}.txt")
             embed = discord.Embed(title="📋 チケットログ", description=f"チャンネル: `{channel.name}`\nクローズ者: {interaction.user.mention}", color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
             await log_ticket(interaction.guild, embed, log_file)
 
@@ -1082,7 +1084,8 @@ async def send_inquiry_panel(interaction: discord.Interaction, category: discord
     await interaction.response.send_message("✅ お問い合わせパネルを送信しました。", ephemeral=True)
 
 
-@bot.tree.command(name="botstatus", description="Botの現在の設定を全員に表示します")
+@bot.tree.command(name="botstatus", description="Botの現在の設定を表示します（スタッフのみ）")
+@staff_check()
 async def botstatus(interaction: discord.Interaction):
     await interaction.response.defer()
     guild = interaction.guild
@@ -1339,7 +1342,7 @@ async def check_auth_tickets():
                     if not channel.name.startswith("auth-request-"):
                         continue
                     has_human_msg = False
-                    async for msg in channel.history(limit=None):
+                    async for msg in channel.history(limit=50):
                         if not msg.author.bot:
                             has_human_msg = True
                             break
@@ -1353,7 +1356,7 @@ async def check_auth_tickets():
             if category:
                 for channel in list(category.text_channels):
                     has_human_msg = False
-                    async for msg in channel.history(limit=None):
+                    async for msg in channel.history(limit=50):
                         if not msg.author.bot:
                             has_human_msg = True
                             break
@@ -1367,13 +1370,20 @@ async def check_auth_tickets():
             if category:
                 for channel in list(category.text_channels):
                     has_human_msg = False
-                    async for msg in channel.history(limit=None):
+                    async for msg in channel.history(limit=50):
                         if not msg.author.bot:
                             has_human_msg = True
                             break
                     if has_human_msg:
                         continue
                     await _auto_delete_ticket(guild, channel, minutes=5)
+
+
+@check_auth_tickets.error
+async def check_auth_tickets_error(error):
+    print(f"❌ check_auth_tickets エラー: {error}")
+    if not check_auth_tickets.is_running():
+        check_auth_tickets.restart()
 
 
 async def _auto_delete_ticket(guild, channel, minutes: int):
