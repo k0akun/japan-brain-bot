@@ -458,10 +458,11 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 @bot.tree.command(name="warnlist", description="全員の警告数一覧を表示します（スタッフのみ）")
 @staff_check()
 async def warnlist(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     rows = await sb_get("warns", "count=gt.0&order=count.desc")
 
     if not rows:
-        await interaction.response.send_message("📋 警告のあるユーザーはいません。", ephemeral=True)
+        await interaction.followup.send("📋 警告のあるユーザーはいません。", ephemeral=True)
         return
 
     embed = discord.Embed(
@@ -484,26 +485,28 @@ async def warnlist(interaction: discord.Interaction):
     if len(lines) > 25:
         embed.set_footer(text=f"他 {len(lines) - 25} 人")
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="warns", description="ユーザーの警告数を確認します")
 @app_commands.describe(member="確認するユーザー")
 @staff_check()
 async def warns(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer(ephemeral=True)
     count = await get_warns(member.id)
-    await interaction.response.send_message(f"📋 {member.mention} の警告数: **{count}回**", ephemeral=True)
+    await interaction.followup.send(f"📋 {member.mention} の警告数: **{count}回**", ephemeral=True)
 
 
 @bot.tree.command(name="clearwarn", description="ユーザーの警告を減らします（スタッフのみ）省略時はリセット")
 @app_commands.describe(member="対象ユーザー", count="減らす回数（省略時はリセット）")
 @staff_check()
 async def clearwarn(interaction: discord.Interaction, member: discord.Member, count: int = None):
+    await interaction.response.defer(ephemeral=True)
     current = await get_warns(member.id)
     if count is None:
         # 省略時：完全リセット
         await reset_warns(member.id)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ {member.mention} の警告をリセットしました。({current}回 → 0回)",
             ephemeral=True
         )
@@ -511,11 +514,11 @@ async def clearwarn(interaction: discord.Interaction, member: discord.Member, co
                          f"実行者: {interaction.user} | {current}回 → 0回")
     else:
         if count <= 0:
-            await interaction.response.send_message("❌ 1以上の回数を指定してください。", ephemeral=True)
+            await interaction.followup.send("❌ 1以上の回数を指定してください。", ephemeral=True)
             return
         new_count = max(current - count, 0)
         await set_warns(member.id, new_count)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ {member.mention} の警告を {count}回 減らしました。({current}回 → {new_count}回)",
             ephemeral=True
         )
@@ -527,8 +530,9 @@ async def clearwarn(interaction: discord.Interaction, member: discord.Member, co
 @app_commands.describe(member="キックするユーザー", reason="理由")
 @staff_check()
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "理由なし"):
+    await interaction.response.defer()
     await member.kick(reason=reason)
-    await interaction.response.send_message(f"👢 {member.mention} をキックしました。\n理由: {reason}")
+    await interaction.followup.send(f"👢 {member.mention} をキックしました。\n理由: {reason}")
     await log_action(interaction.guild, "👢 キック", member, f"理由: {reason} | 実行者: {interaction.user}")
 
 
@@ -536,8 +540,9 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
 @app_commands.describe(member="BANするユーザー", reason="理由")
 @staff_check()
 async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "理由なし"):
+    await interaction.response.defer()
     await member.ban(reason=reason)
-    await interaction.response.send_message(f"🔨 {member.mention} をBANしました。\n理由: {reason}")
+    await interaction.followup.send(f"🔨 {member.mention} をBANしました。\n理由: {reason}")
     await log_action(interaction.guild, "🔨 BAN", member, f"理由: {reason} | 実行者: {interaction.user}")
 
 
@@ -545,13 +550,14 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
 @app_commands.describe(user_id="解除するユーザーのID")
 @staff_check()
 async def unban(interaction: discord.Interaction, user_id: str):
+    await interaction.response.defer()
     try:
         user = await bot.fetch_user(int(user_id))
         await interaction.guild.unban(user)
-        await interaction.response.send_message(f"✅ {user} のBANを解除しました。")
+        await interaction.followup.send(f"✅ {user} のBANを解除しました。")
         await log_action(interaction.guild, "✅ BAN解除", user, f"実行者: {interaction.user}")
     except Exception:
-        await interaction.response.send_message("❌ ユーザーが見つからないか、BANされていません。", ephemeral=True)
+        await interaction.followup.send("❌ ユーザーが見つからないか、BANされていません。", ephemeral=True)
 
 
 @bot.tree.command(name="banlist", description="BANされているユーザーの一覧を表示します（スタッフのみ）")
@@ -589,9 +595,10 @@ async def banlist(interaction: discord.Interaction):
 @app_commands.describe(member="対象ユーザー", minutes="タイムアウト時間（分）", reason="理由")
 @staff_check()
 async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, minutes: int = 10, reason: str = "理由なし"):
+    await interaction.response.defer()
     until = discord.utils.utcnow() + __import__("datetime").timedelta(minutes=minutes)
     await member.timeout(until, reason=reason)
-    await interaction.response.send_message(f"⏱️ {member.mention} を{minutes}分タイムアウトしました。\n理由: {reason}")
+    await interaction.followup.send(f"⏱️ {member.mention} を{minutes}分タイムアウトしました。\n理由: {reason}")
     await log_action(interaction.guild, f"⏱️ タイムアウト {minutes}分", member, f"理由: {reason} | 実行者: {interaction.user}")
 
 
@@ -629,12 +636,13 @@ async def log_ticket(guild: discord.Guild, embed: discord.Embed, file=None):
 @app_commands.describe(domain="追加するドメイン（例: twitter.com）")
 @staff_check()
 async def url_add(interaction: discord.Interaction, domain: str):
+    await interaction.response.defer(ephemeral=True)
     domain = domain.lower().replace("www.", "").strip()
     if domain in ALLOWED_DOMAINS:
-        await interaction.response.send_message(f"⚠️ `{domain}` はすでに許可されています。", ephemeral=True)
+        await interaction.followup.send(f"⚠️ `{domain}` はすでに許可されています。", ephemeral=True)
         return
     ALLOWED_DOMAINS.append(domain)
-    await interaction.response.send_message(f"✅ `{domain}` を許可リストに追加しました。", ephemeral=True)
+    await interaction.followup.send(f"✅ `{domain}` を許可リストに追加しました。", ephemeral=True)
     await log_action(interaction.guild, "🔗 許可URL追加", interaction.user, f"ドメイン: `{domain}`")
 
 
@@ -642,20 +650,22 @@ async def url_add(interaction: discord.Interaction, domain: str):
 @app_commands.describe(domain="削除するドメイン（例: twitter.com）")
 @staff_check()
 async def url_remove(interaction: discord.Interaction, domain: str):
+    await interaction.response.defer(ephemeral=True)
     domain = domain.lower().replace("www.", "").strip()
     if domain not in ALLOWED_DOMAINS:
-        await interaction.response.send_message(f"❌ `{domain}` は登録されていません。", ephemeral=True)
+        await interaction.followup.send(f"❌ `{domain}` は登録されていません。", ephemeral=True)
         return
     ALLOWED_DOMAINS.remove(domain)
-    await interaction.response.send_message(f"✅ `{domain}` を許可リストから削除しました。", ephemeral=True)
+    await interaction.followup.send(f"✅ `{domain}` を許可リストから削除しました。", ephemeral=True)
     await log_action(interaction.guild, "🗑️ 許可URL削除", interaction.user, f"ドメイン: `{domain}`")
 
 
 @bot.tree.command(name="url-list", description="許可されているURLドメイン一覧を表示します（スタッフのみ）")
 @staff_check()
 async def url_list(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     if not ALLOWED_DOMAINS:
-        await interaction.response.send_message("📋 許可されているドメインはありません。", ephemeral=True)
+        await interaction.followup.send("📋 許可されているドメインはありません。", ephemeral=True)
         return
     domain_list = "\n".join([f"・{d}" for d in ALLOWED_DOMAINS])
     embed = discord.Embed(
@@ -663,19 +673,20 @@ async def url_list(interaction: discord.Interaction):
         description=domain_list,
         color=discord.Color.green()
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="badword-add", description="禁止ワードを追加します（スタッフのみ）")
 @app_commands.describe(word="追加する禁止ワード")
 @staff_check()
 async def badword_add(interaction: discord.Interaction, word: str):
+    await interaction.response.defer(ephemeral=True)
     if word in BAD_WORDS:
-        await interaction.response.send_message(f"⚠️ `{word}` はすでに登録されています。", ephemeral=True)
+        await interaction.followup.send(f"⚠️ `{word}` はすでに登録されています。", ephemeral=True)
         return
     await add_bad_word_db(word)
     BAD_WORDS.append(word)
-    await interaction.response.send_message(f"✅ `{word}` を禁止ワードに追加しました。", ephemeral=True)
+    await interaction.followup.send(f"✅ `{word}` を禁止ワードに追加しました。", ephemeral=True)
     await log_action(interaction.guild, "🚫 禁止ワード追加", interaction.user, f"追加ワード: `{word}`")
 
 
@@ -683,20 +694,22 @@ async def badword_add(interaction: discord.Interaction, word: str):
 @app_commands.describe(word="削除する禁止ワード")
 @staff_check()
 async def badword_remove(interaction: discord.Interaction, word: str):
+    await interaction.response.defer(ephemeral=True)
     if word not in BAD_WORDS:
-        await interaction.response.send_message(f"❌ `{word}` は登録されていません。", ephemeral=True)
+        await interaction.followup.send(f"❌ `{word}` は登録されていません。", ephemeral=True)
         return
     await remove_bad_word_db(word)
     BAD_WORDS.remove(word)
-    await interaction.response.send_message(f"✅ `{word}` を禁止ワードから削除しました。", ephemeral=True)
+    await interaction.followup.send(f"✅ `{word}` を禁止ワードから削除しました。", ephemeral=True)
     await log_action(interaction.guild, "🗑️ 禁止ワード削除", interaction.user, f"削除ワード: `{word}`")
 
 
 @bot.tree.command(name="badword-list", description="禁止ワード一覧を表示します（スタッフのみ）")
 @staff_check()
 async def badword_list(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     if not BAD_WORDS:
-        await interaction.response.send_message("📋 禁止ワードは登録されていません。")
+        await interaction.followup.send("📋 禁止ワードは登録されていません。", ephemeral=True)
         return
     word_list = "\n".join([f"・{w}" for w in BAD_WORDS])
     embed = discord.Embed(
@@ -704,7 +717,7 @@ async def badword_list(interaction: discord.Interaction):
         description=word_list,
         color=discord.Color.red()
     )
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ===========================
@@ -715,13 +728,14 @@ async def badword_list(interaction: discord.Interaction):
 @app_commands.describe(channel="除外するチャンネルまたはスレッド")
 @staff_check()
 async def spam_ignore_add(interaction: discord.Interaction, channel: discord.abc.GuildChannel):
+    await interaction.response.defer(ephemeral=True)
     global SPAM_IGNORE_IDS
     if channel.id in SPAM_IGNORE_IDS:
-        await interaction.response.send_message(f"⚠️ {channel.mention} はすでに除外リストに登録されています。", ephemeral=True)
+        await interaction.followup.send(f"⚠️ {channel.mention} はすでに除外リストに登録されています。", ephemeral=True)
         return
     await add_spam_ignore_id(channel.id)
     SPAM_IGNORE_IDS.add(channel.id)
-    await interaction.response.send_message(f"✅ {channel.mention} を長文スパム検知の除外リストに追加しました。", ephemeral=True)
+    await interaction.followup.send(f"✅ {channel.mention} を長文スパム検知の除外リストに追加しました。", ephemeral=True)
     await log_action(interaction.guild, "📋 スパム除外追加", interaction.user, f"チャンネル: {channel.mention} (`{channel.id}`)")
 
 
@@ -729,21 +743,23 @@ async def spam_ignore_add(interaction: discord.Interaction, channel: discord.abc
 @app_commands.describe(channel="除外リストから外すチャンネルまたはスレッド")
 @staff_check()
 async def spam_ignore_remove(interaction: discord.Interaction, channel: discord.abc.GuildChannel):
+    await interaction.response.defer(ephemeral=True)
     global SPAM_IGNORE_IDS
     if channel.id not in SPAM_IGNORE_IDS:
-        await interaction.response.send_message(f"❌ {channel.mention} は除外リストに登録されていません。", ephemeral=True)
+        await interaction.followup.send(f"❌ {channel.mention} は除外リストに登録されていません。", ephemeral=True)
         return
     await remove_spam_ignore_id(channel.id)
     SPAM_IGNORE_IDS.discard(channel.id)
-    await interaction.response.send_message(f"✅ {channel.mention} を除外リストから削除しました。", ephemeral=True)
+    await interaction.followup.send(f"✅ {channel.mention} を除外リストから削除しました。", ephemeral=True)
     await log_action(interaction.guild, "🗑️ スパム除外削除", interaction.user, f"チャンネル: {channel.mention} (`{channel.id}`)")
 
 
 @bot.tree.command(name="spam-ignore-list", description="長文スパム検知の除外リストを表示します（スタッフのみ）")
 @staff_check()
 async def spam_ignore_list(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     if not SPAM_IGNORE_IDS:
-        await interaction.response.send_message("📋 除外リストにチャンネルはありません。", ephemeral=True)
+        await interaction.followup.send("📋 除外リストにチャンネルはありません。", ephemeral=True)
         return
     lines = []
     for cid in SPAM_IGNORE_IDS:
@@ -757,7 +773,7 @@ async def spam_ignore_list(interaction: discord.Interaction):
         description="\n".join(lines),
         color=discord.Color.blurple()
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ===========================
@@ -768,13 +784,14 @@ async def spam_ignore_list(interaction: discord.Interaction):
 @app_commands.describe(role="除外するロール")
 @staff_check()
 async def exempt_role_add(interaction: discord.Interaction, role: discord.Role):
+    await interaction.response.defer(ephemeral=True)
     global EXEMPT_ROLE_IDS
     if role.id in EXEMPT_ROLE_IDS:
-        await interaction.response.send_message(f"⚠️ {role.mention} はすでに除外リストに登録されています。", ephemeral=True)
+        await interaction.followup.send(f"⚠️ {role.mention} はすでに除外リストに登録されています。", ephemeral=True)
         return
     await add_exempt_role_id(role.id)
     EXEMPT_ROLE_IDS.add(role.id)
-    await interaction.response.send_message(f"✅ {role.mention} をAutoMod除外ロールに追加しました。", ephemeral=True)
+    await interaction.followup.send(f"✅ {role.mention} をAutoMod除外ロールに追加しました。", ephemeral=True)
     await log_action(interaction.guild, "🛡️ AutoMod除外ロール追加", interaction.user, f"ロール: {role.name} (`{role.id}`)")
 
 
@@ -782,21 +799,23 @@ async def exempt_role_add(interaction: discord.Interaction, role: discord.Role):
 @app_commands.describe(role="除外を解除するロール")
 @staff_check()
 async def exempt_role_remove(interaction: discord.Interaction, role: discord.Role):
+    await interaction.response.defer(ephemeral=True)
     global EXEMPT_ROLE_IDS
     if role.id not in EXEMPT_ROLE_IDS:
-        await interaction.response.send_message(f"❌ {role.mention} は除外リストに登録されていません。", ephemeral=True)
+        await interaction.followup.send(f"❌ {role.mention} は除外リストに登録されていません。", ephemeral=True)
         return
     await remove_exempt_role_id(role.id)
     EXEMPT_ROLE_IDS.discard(role.id)
-    await interaction.response.send_message(f"✅ {role.mention} をAutoMod除外ロールから削除しました。", ephemeral=True)
+    await interaction.followup.send(f"✅ {role.mention} をAutoMod除外ロールから削除しました。", ephemeral=True)
     await log_action(interaction.guild, "🗑️ AutoMod除外ロール削除", interaction.user, f"ロール: {role.name} (`{role.id}`)")
 
 
 @bot.tree.command(name="exempt-role-list", description="AutoMod除外ロール一覧を表示します（スタッフのみ）")
 @staff_check()
 async def exempt_role_list(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     if not EXEMPT_ROLE_IDS:
-        await interaction.response.send_message("📋 除外ロールは登録されていません。", ephemeral=True)
+        await interaction.followup.send("📋 除外ロールは登録されていません。", ephemeral=True)
         return
     lines = []
     for rid in EXEMPT_ROLE_IDS:
@@ -810,7 +829,7 @@ async def exempt_role_list(interaction: discord.Interaction):
         description="\n".join(lines),
         color=discord.Color.blurple()
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ===========================
@@ -832,6 +851,7 @@ async def setup(
     mod_log: discord.TextChannel = None,
     backup_channel: discord.TextChannel = None
 ):
+    await interaction.response.defer(ephemeral=True)
     if not any([auth_category, ticket_log, mod_log, backup_channel]):
         guild = interaction.guild
         auth_cat_id = await get_auth_category_id()
@@ -847,7 +867,7 @@ async def setup(
         embed.add_field(name="📋 チケットログ", value=log_ch.mention if log_ch else "❌ 未設定", inline=False)
         embed.add_field(name="🔨 モデレーションログ", value=mod_ch.mention if mod_ch else "⚠️ 未設定（チケットログと共用）", inline=False)
         embed.add_field(name="💾 バックアップチャンネル", value=bk_ch.mention if bk_ch else "⚠️ 未設定", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
     changed = []
@@ -877,7 +897,7 @@ async def setup(
         await backup_channel.send(embed=embed_bk, file=file)
 
     embed = discord.Embed(title="✅ 設定を更新しました", description="\n".join(changed), color=discord.Color.green())
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ===========================
@@ -1018,6 +1038,7 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str, labe
 @app_commands.describe(category="認証チケット用カテゴリ（省略で現在の設定を使用）")
 @staff_check()
 async def send_auth_panel(interaction: discord.Interaction, category: discord.CategoryChannel = None):
+    await interaction.response.defer(ephemeral=True)
     if category:
         await set_config("auth_category_id", category.id)
     embed = discord.Embed(
@@ -1026,7 +1047,7 @@ async def send_auth_panel(interaction: discord.Interaction, category: discord.Ca
         color=discord.Color.gold()
     )
     await interaction.channel.send(embed=embed, view=AuthPanelView())
-    await interaction.response.send_message("✅ 認証リクエストパネルを送信しました。", ephemeral=True)
+    await interaction.followup.send("✅ 認証リクエストパネルを送信しました。", ephemeral=True)
 
 
 @bot.tree.command(name="ticket-panel", description="サポート＆お問い合わせパネルを送信します（管理者のみ）")
@@ -1036,6 +1057,7 @@ async def send_auth_panel(interaction: discord.Interaction, category: discord.Ca
 )
 @staff_check()
 async def send_panel(interaction: discord.Interaction, support_category: discord.CategoryChannel = None, inquiry_category: discord.CategoryChannel = None):
+    await interaction.response.defer(ephemeral=True)
     if support_category:
         await set_config("ticket_category_id", support_category.id)
     if inquiry_category:
@@ -1070,7 +1092,7 @@ async def send_panel(interaction: discord.Interaction, support_category: discord
     else:
         info.append("⚠️ お問い合わせカテゴリ: **未設定**（`/ticket-panel inquiry_category:カテゴリ名` で設定してください）")
 
-    await interaction.response.send_message("✅ パネルを送信しました。\n" + "\n".join(info), ephemeral=True)
+    await interaction.followup.send("✅ パネルを送信しました。\n" + "\n".join(info), ephemeral=True)
 
 
 @bot.tree.command(name="inquiry-panel", description="お問い合わせパネルを送信します（管理者のみ）")
@@ -1081,7 +1103,7 @@ async def send_inquiry_panel(interaction: discord.Interaction, category: discord
         await set_config("inquiry_category_id", category.id)
     embed = discord.Embed(title="📩 お問い合わせ", description="📩 **お問い合わせ** — その他のお問い合わせはこちら", color=discord.Color.blurple())
     await interaction.channel.send(embed=embed, view=InquiryPanelView())
-    await interaction.response.send_message("✅ お問い合わせパネルを送信しました。", ephemeral=True)
+    await interaction.followup.send("✅ お問い合わせパネルを送信しました。", ephemeral=True)
 
 
 @bot.tree.command(name="botstatus", description="Botの現在の設定を表示します（スタッフのみ）")
