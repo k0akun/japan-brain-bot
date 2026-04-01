@@ -137,6 +137,19 @@ async def get_mod_log_channel_id():
 async def get_backup_channel_id():
     return await get_config("backup_channel_id")
 
+# ===== AutoMod除外ロール（Supabase） =====
+async def get_exempt_role_ids() -> list:
+    rows = await sb_get("exempt_roles", "select=role_id")
+    if rows and len(rows) > 0:
+        return [r["role_id"] for r in rows]
+    return []
+
+async def add_exempt_role_id(role_id: int):
+    await sb_upsert("exempt_roles", {"role_id": role_id})
+
+async def remove_exempt_role_id(role_id: int):
+    await sb_delete("exempt_roles", f"role_id=eq.{role_id}")
+
 # ===== 長文スパム除外チャンネル（Supabase） =====
 async def get_spam_ignore_ids() -> list:
     rows = await sb_get("spam_ignore", "select=channel_id")
@@ -173,6 +186,8 @@ join_tracker = []
 BAD_WORDS = []
 # 長文スパム除外チャンネル/スレッドIDはBot起動時に読み込む
 SPAM_IGNORE_IDS: set = set()
+# AutoMod除外ロールIDはBot起動時に読み込む
+EXEMPT_ROLE_IDS: set = set()
 
 
 # ===========================
@@ -216,9 +231,13 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # スタッフは全てスキップ
-    staff_role = message.guild.get_role(ADMIN_ROLE_ID)
-    if staff_role in message.author.roles or message.author.guild_permissions.administrator:
+    # スタッフ・除外ロール保持者は全てスキップ
+    if message.author.guild_permissions.administrator:
+        await bot.process_commands(message)
+        return
+    member_role_ids = {r.id for r in message.author.roles}
+    skip_role_ids = {ADMIN_ROLE_ID, SUB_ROLE_ID} | EXEMPT_ROLE_IDS
+    if member_role_ids & skip_role_ids:
         await bot.process_commands(message)
         return
 
@@ -740,6 +759,59 @@ async def spam_ignore_list(interaction: discord.Interaction):
 
 
 # ===========================
+# ===== AutoMod除外ロール管理 =====
+# ===========================
+
+@bot.tree.command(name="exempt-role-add", description="AutoMod検知対象外にするロールを追加します（スタッフのみ）")
+@app_commands.describe(role="除外するロール")
+@staff_check()
+async def exempt_role_add(interaction: discord.Interaction, role: discord.Role):
+    global EXEMPT_ROLE_IDS
+    if role.id in EXEMPT_ROLE_IDS:
+        await interaction.response.send_message(f"⚠️ {role.mention} はすでに除外リストに登録されています。", ephemeral=True)
+        return
+    await add_exempt_role_id(role.id)
+    EXEMPT_ROLE_IDS.add(role.id)
+    await interaction.response.send_message(f"✅ {role.mention} をAutoMod除外ロールに追加しました。", ephemeral=True)
+    await log_action(interaction.guild, "🛡️ AutoMod除外ロール追加", interaction.user, f"ロール: {role.name} (`{role.id}`)")
+
+
+@bot.tree.command(name="exempt-role-remove", description="AutoMod除外ロールを解除します（スタッフのみ）")
+@app_commands.describe(role="除外を解除するロール")
+@staff_check()
+async def exempt_role_remove(interaction: discord.Interaction, role: discord.Role):
+    global EXEMPT_ROLE_IDS
+    if role.id not in EXEMPT_ROLE_IDS:
+        await interaction.response.send_message(f"❌ {role.mention} は除外リストに登録されていません。", ephemeral=True)
+        return
+    await remove_exempt_role_id(role.id)
+    EXEMPT_ROLE_IDS.discard(role.id)
+    await interaction.response.send_message(f"✅ {role.mention} をAutoMod除外ロールから削除しました。", ephemeral=True)
+    await log_action(interaction.guild, "🗑️ AutoMod除外ロール削除", interaction.user, f"ロール: {role.name} (`{role.id}`)")
+
+
+@bot.tree.command(name="exempt-role-list", description="AutoMod除外ロール一覧を表示します（スタッフのみ）")
+@staff_check()
+async def exempt_role_list(interaction: discord.Interaction):
+    if not EXEMPT_ROLE_IDS:
+        await interaction.response.send_message("📋 除外ロールは登録されていません。", ephemeral=True)
+        return
+    lines = []
+    for rid in EXEMPT_ROLE_IDS:
+        role = interaction.guild.get_role(rid)
+        if role:
+            lines.append(f"・{role.mention} (`{rid}`)")
+        else:
+            lines.append(f"・不明なロール (`{rid}`)")
+    embed = discord.Embed(
+        title="🛡️ AutoMod除外ロール一覧",
+        description="\n".join(lines),
+        color=discord.Color.blurple()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ===========================
 # ===== セットアップコマンド =====
 # ===========================
 
@@ -1234,9 +1306,10 @@ AUTH_TICKET_TIMEOUT_HOURS = 0.083  # 認証チケット: 5分（=5/60時間）
 
 @bot.event
 async def on_ready():
-    global BAD_WORDS, SPAM_IGNORE_IDS
+    global BAD_WORDS, SPAM_IGNORE_IDS, EXEMPT_ROLE_IDS
     BAD_WORDS = await load_bad_words_db()
     SPAM_IGNORE_IDS = set(await get_spam_ignore_ids())
+    EXEMPT_ROLE_IDS = set(await get_exempt_role_ids())
     check_auth_tickets.start()
     auto_backup.start()
     bot.add_view(TicketPanelView())
