@@ -647,9 +647,9 @@ class WarnSeverity(discord.ui.View):
                 await member.ban(reason=f"警告が{count}回に達したためBAN")
             except Exception:
                 pass
-            await interaction.response.edit_message(
-                content=f"🔨 {member.mention} の警告が **{count}回** に達したためBANしました。",
-                embed=None, view=None
+            await interaction.response.edit_message(content="✅ 処理完了", embed=None, view=None)
+            await interaction.followup.send(
+                content=f"🔨 {member.mention} の警告が **{count}回** に達したためBANしました。"
             )
             await log_action(guild, "🔨 BAN（警告上限）", member, f"警告{count}回 | 実行者: {interaction.user}")
             self.stop()
@@ -669,7 +669,8 @@ class WarnSeverity(discord.ui.View):
                   "danger": "永続（自動解除なし）"}[rank]
         embed.set_footer(text=footer)
 
-        await interaction.response.edit_message(embed=embed, view=None)
+        await interaction.response.edit_message(content="✅ 警告を発行しました。", embed=None, view=None)
+        await interaction.followup.send(embed=embed)
         await log_action(guild, f"{rank_emoji} 警告（{rank_label}）", member,
                          f"理由: {reason} | 累計{count}回(+{total_add}) | 実行者: {interaction.user}")
         self.stop()
