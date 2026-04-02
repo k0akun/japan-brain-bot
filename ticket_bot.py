@@ -498,6 +498,138 @@ async def log_ticket(guild: discord.Guild, embed: discord.Embed, file=None):
 # ===== 警告システム =====
 # ===========================
 
+class WarnSeverity(discord.ui.View):
+    def __init__(self, member, reason, base_count):
+        super().__init__(timeout=60)
+        self.member = member
+        self.reason = reason
+        self.base_count = base_count  # /warn実行時点での警告数（+1済み）
+
+    async def _apply(self, interaction: discord.Interaction, rank: str, total_add: int):
+        guild = interaction.guild
+        member = self.member
+        reason = self.reason
+        from datetime import timedelta
+
+        # 追加分を加算（base_countはすでに+1されているので残りを追加）
+        extra = total_add - 1
+        if extra > 0:
+            current = await get_warns(member.id)
+            await set_warns(member.id, current + extra)
+        count = await get_warns(member.id)
+
+        rank_label = {"light": "軽度", "caution": "中度", "danger": "重度"}[rank]
+        rank_emoji = {"light": "🟡", "caution": "🟠", "danger": "🔴"}[rank]
+        rank_color = {"light": discord.Color.yellow(), "caution": discord.Color.orange(), "danger": discord.Color.red()}[rank]
+        now = datetime.now(timezone.utc)
+
+        # 既存のタイマー・ロールをリセット
+        old_data = warn_role_timers.pop(member.id, None)
+        if old_data:
+            old_role_id = await get_warn_role_id(old_data["rank"])
+            if old_role_id:
+                old_role = guild.get_role(old_role_id)
+                if old_role and old_role in member.roles:
+                    try:
+                        await member.remove_roles(old_role, reason="警告ランク更新")
+                    except Exception:
+                        pass
+            await db_remove_warn_timer(member.id)
+
+        # ロール付与＆タイマー設定
+        if rank == "light":
+            expire_at = now + timedelta(days=14)
+            warn_role_timers[member.id] = {"rank": "light", "expire_at": expire_at}
+            await db_set_warn_timer(member.id, "light", expire_at)
+
+        elif rank == "caution":
+            role_id = await get_warn_role_id("caution")
+            if role_id:
+                role = guild.get_role(role_id)
+                if role:
+                    try:
+                        await member.add_roles(role, reason=f"警告ランク: {rank_label}")
+                    except Exception:
+                        pass
+            expire_at = now + timedelta(days=30)
+            warn_role_timers[member.id] = {"rank": "caution", "expire_at": expire_at}
+            await db_set_warn_timer(member.id, "caution", expire_at)
+
+        elif rank == "danger":
+            role_id = await get_warn_role_id("danger")
+            if role_id:
+                role = guild.get_role(role_id)
+                if role:
+                    try:
+                        await member.add_roles(role, reason=f"警告ランク: {rank_label}")
+                    except Exception:
+                        pass
+            # 永続
+            warn_role_timers.pop(member.id, None)
+            await db_set_warn_timer(member.id, "danger", None)
+
+        # 10回でBAN
+        if count >= 10:
+            try:
+                await member.send(f"🔨 **{guild.name}** での警告が **{count}回** に達したためBANされました。")
+            except Exception:
+                pass
+            try:
+                await member.ban(reason=f"警告が{count}回に達したためBAN")
+            except Exception:
+                pass
+            await interaction.response.edit_message(
+                content=f"🔨 {member.mention} の警告が **{count}回** に達したためBANしました。",
+                embed=None, view=None
+            )
+            await log_action(guild, "🔨 BAN（警告上限）", member, f"警告{count}回 | 実行者: {interaction.user}")
+            self.stop()
+            return
+
+        embed = discord.Embed(
+            title=f"{rank_emoji} 警告発行（{rank_label}）",
+            color=rank_color,
+            timestamp=now
+        )
+        embed.add_field(name="対象", value=member.mention, inline=True)
+        embed.add_field(name="累計警告", value=f"**{count}回**", inline=True)
+        embed.add_field(name="加算", value=f"+{total_add}回", inline=True)
+        embed.add_field(name="理由", value=reason, inline=False)
+        footer = {"light": "2週間後に自動解除（新たな警告でリセット）",
+                  "caution": "1ヶ月後に自動解除（新たな警告でリセット）",
+                  "danger": "永続（自動解除なし）"}[rank]
+        embed.set_footer(text=footer)
+
+        await interaction.response.edit_message(embed=embed, view=None)
+        await log_action(guild, f"{rank_emoji} 警告（{rank_label}）", member,
+                         f"理由: {reason} | 累計{count}回(+{total_add}) | 実行者: {interaction.user}")
+        self.stop()
+
+    @discord.ui.button(label="🟡 軽度 +1", style=discord.ButtonStyle.secondary, custom_id="ws_light_1")
+    async def light_1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply(interaction, "light", 1)
+
+    @discord.ui.button(label="🟡 軽度 +2", style=discord.ButtonStyle.secondary, custom_id="ws_light_2")
+    async def light_2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply(interaction, "light", 2)
+
+    @discord.ui.button(label="🟠 中度 +3", style=discord.ButtonStyle.primary, custom_id="ws_caution_3")
+    async def caution_3(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply(interaction, "caution", 3)
+
+    @discord.ui.button(label="🟠 中度 +6", style=discord.ButtonStyle.primary, custom_id="ws_caution_6")
+    async def caution_6(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply(interaction, "caution", 6)
+
+    @discord.ui.button(label="🔴 重度 +7", style=discord.ButtonStyle.danger, custom_id="ws_danger_7")
+    async def danger_7(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply(interaction, "danger", 7)
+
+    @discord.ui.button(label="🔴 重度 +10", style=discord.ButtonStyle.danger, custom_id="ws_danger_10")
+    async def danger_10(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._apply(interaction, "danger", 10)
+
+
 @bot.tree.command(name="warn", description="ユーザーに警告を出します（スタッフのみ）")
 @staff_check()
 @app_commands.describe(member="警告するユーザー", reason="理由")
@@ -505,9 +637,24 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
     await interaction.response.defer()
     count = await get_warns(member.id) + 1
     await set_warns(member.id, count)
-    await interaction.followup.send(f"⚠️ {member.mention} に警告を出しました。({count}回目)\n理由: {reason}")
-    await log_action(interaction.guild, "⚠️ 警告", member, f"理由: {reason} | 合計{count}回 | 実行者: {interaction.user}")
-    await auto_punish(member, interaction.guild, count)
+
+    embed = discord.Embed(
+        title="⚠️ 警告ランクを選択してください",
+        description=(
+            f"対象: {member.mention}\n"
+            f"理由: {reason}\n"
+            f"現在の累計警告: **{count}回**\n\n"
+            f"下のボタンでランクと加算回数を選択してください。"
+        ),
+        color=discord.Color.yellow(),
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(name="🟡 軽度", value="+1 or +2回 | 2週間で自動解除", inline=False)
+    embed.add_field(name="🟠 中度", value="+3 or +6回 | 注意人物ロール付与 | 1ヶ月で自動解除", inline=False)
+    embed.add_field(name="🔴 重度", value="+7 or +10回 | 要注意人物ロール付与 | 永続", inline=False)
+
+    view = WarnSeverity(member, reason, count)
+    await interaction.followup.send(embed=embed, view=view)
 
 
 @bot.tree.command(name="warnlist", description="全員の警告数一覧を表示します（スタッフのみ）")
@@ -560,6 +707,21 @@ async def clearwarn(interaction: discord.Interaction, member: discord.Member, co
         await set_warns(member.id, new_count)
         await interaction.followup.send(f"✅ {member.mention} の警告を {count}回 減らしました。({current}回 → {new_count}回)", ephemeral=True)
         await log_action(interaction.guild, "🔽 警告減算", member, f"実行者: {interaction.user} | {current}回 → {new_count}回（{count}回減算）")
+
+
+@bot.tree.command(name="set-warn-role", description="警告ランクに付与するロールを設定します（管理者のみ）")
+@staff_check()
+@app_commands.describe(rank="ランク（中度=注意人物 / 重度=要注意人物）", role="付与するロール")
+@app_commands.choices(rank=[
+    app_commands.Choice(name="中度（注意人物）", value="caution"),
+    app_commands.Choice(name="重度（要注意人物）", value="danger"),
+])
+async def set_warn_role(interaction: discord.Interaction, rank: str, role: discord.Role):
+    await interaction.response.defer(ephemeral=True)
+    await set_warn_role_id(rank, role.id)
+    rank_label = "注意人物（中度）" if rank == "caution" else "要注意人物（重度）"
+    await interaction.followup.send(f"✅ **{rank_label}** ロールを {role.mention} に設定しました。", ephemeral=True)
+    await log_action(interaction.guild, "⚙️ 警告ランクロール設定", interaction.user, f"ランク: {rank_label} | ロール: {role.name}")
 
 
 @bot.tree.command(name="kick", description="ユーザーをキックします（スタッフのみ）")
@@ -1301,6 +1463,7 @@ async def on_ready():
     EXEMPT_ROLE_IDS = set(await get_exempt_role_ids())
     ROLE_ALLOWED_DOMAINS = await get_role_allowed_domains()
     check_auth_tickets.start()
+    check_warn_role_expire.start()
     auto_backup.start()
     bot.add_view(TicketPanelView())
     bot.add_view(InquiryPanelView())
@@ -1321,6 +1484,37 @@ async def on_ready():
 # ===========================
 # ===== 認証チケット自動削除 =====
 # ===========================
+
+@tasks.loop(minutes=10)
+async def check_warn_role_expire():
+    """軽度（2週間）・中度（1ヶ月）の警告ロールを自動解除する（DB連携）"""
+    now = datetime.now(timezone.utc)
+    expired = [uid for uid, data in list(warn_role_timers.items())
+               if data["expire_at"] is not None and data["expire_at"] <= now]
+    for uid in expired:
+        data = warn_role_timers.pop(uid, None)
+        if not data:
+            continue
+        await db_remove_warn_timer(uid)
+        for guild in bot.guilds:
+            member = guild.get_member(uid)
+            if not member:
+                continue
+            role_id = await get_warn_role_id(data["rank"])
+            if role_id:
+                role = guild.get_role(role_id)
+                if role and role in member.roles:
+                    try:
+                        await member.remove_roles(role, reason="警告ランク自動解除")
+                        await log_action(guild, "✅ 警告ランクロール自動解除", member, f"ランク: {data['rank']} | 期限切れ")
+                    except Exception:
+                        pass
+
+
+@check_warn_role_expire.before_loop
+async def before_warn_expire():
+    await bot.wait_until_ready()
+
 
 @tasks.loop(minutes=2)
 async def check_auth_tickets():
