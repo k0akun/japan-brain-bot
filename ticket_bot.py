@@ -536,12 +536,45 @@ async def log_ticket(guild: discord.Guild, embed: discord.Embed, file=None):
 # ===== 警告システム =====
 # ===========================
 
+# ===== 警告ランク モーダル =====
+class WarnModal(discord.ui.Modal):
+    def __init__(self, member, reason, base_count, rank, min_val, max_val):
+        rank_label = {"light": "軽度", "caution": "中度", "danger": "重度"}[rank]
+        super().__init__(title=f"警告ランク: {rank_label}")
+        self.member = member
+        self.reason = reason
+        self.base_count = base_count
+        self.rank = rank
+        self.min_val = min_val
+        self.max_val = max_val
+        self.points_input = discord.ui.TextInput(
+            label=f"加算する警告回数（{min_val}〜{max_val}）",
+            placeholder=f"{min_val}〜{max_val}の数字を入力",
+            min_length=1,
+            max_length=2,
+            required=True
+        )
+        self.add_item(self.points_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            total_add = int(self.points_input.value)
+        except ValueError:
+            await interaction.response.send_message("❌ 数字を入力してください。", ephemeral=True)
+            return
+        if not (self.min_val <= total_add <= self.max_val):
+            await interaction.response.send_message(
+                f"❌ {self.min_val}〜{self.max_val}の数字を入力してください。", ephemeral=True)
+            return
+        await self.view._apply(interaction, self.rank, total_add)
+
+
 class WarnSeverity(discord.ui.View):
     def __init__(self, member, reason, base_count):
         super().__init__(timeout=60)
         self.member = member
         self.reason = reason
-        self.base_count = base_count  # /warn実行時点での警告数（+1済み）
+        self.base_count = base_count
 
     async def _apply(self, interaction: discord.Interaction, rank: str, total_add: int):
         guild = interaction.guild
@@ -549,7 +582,6 @@ class WarnSeverity(discord.ui.View):
         reason = self.reason
         from datetime import timedelta
 
-        # 追加分を加算（base_countはすでに+1されているので残りを追加）
         extra = total_add - 1
         if extra > 0:
             current = await get_warns(member.id)
@@ -561,7 +593,7 @@ class WarnSeverity(discord.ui.View):
         rank_color = {"light": discord.Color.yellow(), "caution": discord.Color.orange(), "danger": discord.Color.red()}[rank]
         now = datetime.now(timezone.utc)
 
-        # 既存のタイマー・ロールをリセット
+        # 既存タイマー・ロールをリセット
         old_data = warn_role_timers.pop(member.id, None)
         if old_data:
             old_role_id = await get_warn_role_id(old_data["rank"])
@@ -602,7 +634,6 @@ class WarnSeverity(discord.ui.View):
                         await member.add_roles(role, reason=f"警告ランク: {rank_label}")
                     except Exception:
                         pass
-            # 永続
             warn_role_timers.pop(member.id, None)
             await db_set_warn_timer(member.id, "danger", None)
 
@@ -616,7 +647,7 @@ class WarnSeverity(discord.ui.View):
                 await member.ban(reason=f"警告が{count}回に達したためBAN")
             except Exception:
                 pass
-            await interaction.message.edit(
+            await interaction.response.edit_message(
                 content=f"🔨 {member.mention} の警告が **{count}回** に達したためBANしました。",
                 embed=None, view=None
             )
@@ -638,34 +669,28 @@ class WarnSeverity(discord.ui.View):
                   "danger": "永続（自動解除なし）"}[rank]
         embed.set_footer(text=footer)
 
-        await interaction.message.edit(embed=embed, view=None)
+        await interaction.response.edit_message(embed=embed, view=None)
         await log_action(guild, f"{rank_emoji} 警告（{rank_label}）", member,
                          f"理由: {reason} | 累計{count}回(+{total_add}) | 実行者: {interaction.user}")
         self.stop()
 
-    @discord.ui.button(label="🟡 軽度 +1", style=discord.ButtonStyle.secondary, custom_id="ws_light_1")
-    async def light_1(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._apply(interaction, "light", 1)
+    @discord.ui.button(label="🟡 軽度（1〜2）", style=discord.ButtonStyle.secondary, custom_id="ws_light")
+    async def light(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = WarnModal(self.member, self.reason, self.base_count, "light", 1, 2)
+        modal.view = self
+        await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="🟡 軽度 +2", style=discord.ButtonStyle.secondary, custom_id="ws_light_2")
-    async def light_2(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._apply(interaction, "light", 2)
+    @discord.ui.button(label="🟠 中度（3〜6）", style=discord.ButtonStyle.primary, custom_id="ws_caution")
+    async def caution(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = WarnModal(self.member, self.reason, self.base_count, "caution", 3, 6)
+        modal.view = self
+        await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="🟠 中度 +3", style=discord.ButtonStyle.primary, custom_id="ws_caution_3")
-    async def caution_3(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._apply(interaction, "caution", 3)
-
-    @discord.ui.button(label="🟠 中度 +6", style=discord.ButtonStyle.primary, custom_id="ws_caution_6")
-    async def caution_6(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._apply(interaction, "caution", 6)
-
-    @discord.ui.button(label="🔴 重度 +7", style=discord.ButtonStyle.danger, custom_id="ws_danger_7")
-    async def danger_7(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._apply(interaction, "danger", 7)
-
-    @discord.ui.button(label="🔴 重度 +10", style=discord.ButtonStyle.danger, custom_id="ws_danger_10")
-    async def danger_10(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._apply(interaction, "danger", 10)
+    @discord.ui.button(label="🔴 重度（7〜10）", style=discord.ButtonStyle.danger, custom_id="ws_danger")
+    async def danger(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = WarnModal(self.member, self.reason, self.base_count, "danger", 7, 10)
+        modal.view = self
+        await interaction.response.send_modal(modal)
 
 
 @bot.tree.command(name="warn", description="ユーザーに警告を出します（スタッフのみ）")
@@ -681,17 +706,17 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
             f"対象: {member.mention}\n"
             f"理由: {reason}\n"
             f"現在の累計警告: **{count}回**\n\n"
-            f"下のボタンでランクと加算回数を選択してください。"
+            f"ランクボタンを押すと回数入力欄が出ます。"
         ),
         color=discord.Color.yellow(),
         timestamp=datetime.now(timezone.utc)
     )
-    embed.add_field(name="🟡 軽度", value="+1 or +2回 | 2週間で自動解除", inline=False)
-    embed.add_field(name="🟠 中度", value="+3 or +6回 | 注意人物ロール付与 | 1ヶ月で自動解除", inline=False)
-    embed.add_field(name="🔴 重度", value="+7 or +10回 | 要注意人物ロール付与 | 永続", inline=False)
+    embed.add_field(name="🟡 軽度", value="1〜2回 | 2週間で自動解除", inline=False)
+    embed.add_field(name="🟠 中度", value="3〜6回 | 注意人物ロール付与 | 1ヶ月で自動解除", inline=False)
+    embed.add_field(name="🔴 重度", value="7〜10回 | 要注意人物ロール付与 | 永続", inline=False)
 
     view = WarnSeverity(member, reason, count)
-    await interaction.response.send_message(embed=embed, view=view)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 @bot.tree.command(name="warnlist", description="全員の警告数一覧を表示します（スタッフのみ）")
