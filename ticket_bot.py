@@ -1372,25 +1372,138 @@ async def botstatus(interaction: discord.Interaction):
     inq_cat = guild.get_channel(inq_cat_id) if inq_cat_id else None
     log_ch = guild.get_channel(log_id) if log_id else None
     mod_log_ch = guild.get_channel(mod_log_id) if mod_log_id else None
-    embed = discord.Embed(title="🤖 Bot設定状況", color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc))
+
+    # 警告ランクロール取得
+    caution_role_id = await get_warn_role_id("caution")
+    danger_role_id = await get_warn_role_id("danger")
+    caution_role = guild.get_role(caution_role_id) if caution_role_id else None
+    danger_role = guild.get_role(danger_role_id) if danger_role_id else None
+
+    # ===== 設定状況 =====
+    embed = discord.Embed(title="🤖 Bot設定状況 & コマンド一覧", color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc))
+
+    # チケット設定
     embed.add_field(name="🎫 サポートカテゴリ", value=category.name if category else "❌ 未設定", inline=True)
     embed.add_field(name="📩 お問い合わせカテゴリ", value=inq_cat.name if inq_cat else "❌ 未設定", inline=True)
     embed.add_field(name="🔑 認証カテゴリ", value=auth_cat.name if auth_cat else "❌ 未設定", inline=True)
     embed.add_field(name="📋 チケットログ", value=log_ch.mention if log_ch else "❌ 未設定", inline=True)
     embed.add_field(name="🔨 モデレーションログ", value=mod_log_ch.mention if mod_log_ch else "チケットログと共用", inline=True)
-    embed.add_field(name="🛡️ AutoMod設定", value=f"長文: **{MAX_MESSAGE_LENGTH}文字**以上\n改行: **{MAX_NEWLINES}回**以上\n連続スパム: **{SPAM_COUNT}回**\n複数垢スパム: **{CONTENT_SPAM_SECONDS}秒**以内に**{CONTENT_SPAM_USERS}人**\n自動TO: **{TIMEOUT_MINUTES}分**\n転送メッセージ: **検知対象**", inline=False)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+    # AutoMod設定
+    embed.add_field(
+        name="🛡️ AutoMod設定",
+        value=(
+            f"長文: **{MAX_MESSAGE_LENGTH}文字**以上\n"
+            f"改行: **{MAX_NEWLINES}回**以上\n"
+            f"連続スパム: **{SPAM_COUNT}回**\n"
+            f"複数垢スパム: **{CONTENT_SPAM_SECONDS}秒**以内に**{CONTENT_SPAM_USERS}人**\n"
+            f"自動TO: **{TIMEOUT_MINUTES}分**\n"
+            f"転送メッセージ: **検知対象**"
+        ),
+        inline=False
+    )
+
+    # URL設定
     domain_list = "\n".join([f"・{d}" for d in ALLOWED_DOMAINS]) if ALLOWED_DOMAINS else "なし"
-    embed.add_field(name="🔗 許可URL（全員）", value=domain_list, inline=False)
+    embed.add_field(name="🔗 許可URL（全員）", value=domain_list, inline=True)
     role_url_info = ""
     if ROLE_ALLOWED_DOMAINS:
         for role_id, domains in ROLE_ALLOWED_DOMAINS.items():
             role = guild.get_role(role_id)
             role_url_info += f"**{role.name if role else role_id}**: {', '.join(domains)}\n"
-    embed.add_field(name="🎭 ロール別許可URL", value=role_url_info or "なし", inline=False)
+    embed.add_field(name="🎭 ロール別許可URL", value=role_url_info or "なし", inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+    # 禁止ワード
     word_list = "　".join([f"`{w}`" for w in BAD_WORDS]) if BAD_WORDS else "なし"
     embed.add_field(name="🚫 禁止ワード", value=word_list, inline=False)
-    embed.add_field(name="⚠️ 警告", value="3回→5分TO / 5回→30分TO / 7回以上→1時間TO", inline=False)
+
+    # 警告ランク設定
+    embed.add_field(
+        name="⚠️ 警告ランク制度",
+        value=(
+            f"🟡 **軽度**（+1〜2回）: 2週間で自動解除\n"
+            f"🟠 **中度**（+3〜6回）: {caution_role.mention if caution_role else '❌ ロール未設定'} | 1ヶ月で自動解除\n"
+            f"🔴 **重度**（+7〜10回）: {danger_role.mention if danger_role else '❌ ロール未設定'} | 永続\n"
+            f"累計**10回**でBAN自動実行"
+        ),
+        inline=False
+    )
+
     await interaction.followup.send(embed=embed)
+
+    # ===== コマンド一覧（別embed） =====
+    embed2 = discord.Embed(title="📖 コマンド一覧", color=discord.Color.green(), timestamp=datetime.now(timezone.utc))
+    embed2.add_field(
+        name="⚠️ 警告・モデレーション",
+        value=(
+            "`/warn @ユーザー 理由` — 警告発行（ランク選択UI）\n"
+            "`/warns @ユーザー` — 警告数確認\n"
+            "`/warnlist` — 全員の警告数一覧\n"
+            "`/clearwarn @ユーザー 回数` — 警告リセット/減算\n"
+            "`/set-warn-role rank role` — 警告ランクロール設定\n"
+            "`/kick @ユーザー 理由` — キック\n"
+            "`/ban @ユーザー 理由` — BAN\n"
+            "`/unban ユーザーID` — BAN解除\n"
+            "`/banlist` — BAN一覧\n"
+            "`/timeout @ユーザー 分数 理由` — タイムアウト"
+        ),
+        inline=False
+    )
+    embed2.add_field(
+        name="🔗 URL管理",
+        value=(
+            "`/url-add ドメイン` — 全員許可URLを追加\n"
+            "`/url-remove ドメイン` — 全員許可URLを削除\n"
+            "`/url-list` — 全員許可URL一覧\n"
+            "`/role-url-add @ロール ドメイン` — ロール別許可URLを追加\n"
+            "`/role-url-remove @ロール ドメイン` — ロール別許可URLを削除\n"
+            "`/role-url-list` — ロール別許可URL一覧"
+        ),
+        inline=False
+    )
+    embed2.add_field(
+        name="🚫 禁止ワード",
+        value=(
+            "`/badword-add ワード` — 禁止ワード追加\n"
+            "`/badword-remove ワード` — 禁止ワード削除\n"
+            "`/badword-list` — 禁止ワード一覧"
+        ),
+        inline=False
+    )
+    embed2.add_field(
+        name="🛡️ AutoMod除外設定",
+        value=(
+            "`/spam-ignore-add #チャンネル` — 長文検知除外に追加\n"
+            "`/spam-ignore-remove #チャンネル` — 長文検知除外から削除\n"
+            "`/spam-ignore-list` — 長文検知除外一覧\n"
+            "`/exempt-role-add @ロール` — AutoMod除外ロール追加\n"
+            "`/exempt-role-remove @ロール` — AutoMod除外ロール削除\n"
+            "`/exempt-role-list` — AutoMod除外ロール一覧"
+        ),
+        inline=False
+    )
+    embed2.add_field(
+        name="🎫 チケット・パネル",
+        value=(
+            "`/auth-panel` — 認証リクエストパネルを送信\n"
+            "`/ticket-panel` — サポートパネルを送信\n"
+            "`/inquiry-panel` — お問い合わせパネルを送信"
+        ),
+        inline=False
+    )
+    embed2.add_field(
+        name="⚙️ セットアップ・管理",
+        value=(
+            "`/setup` — Bot設定（カテゴリ・ログch等）\n"
+            "`/botstatus` — 設定確認＆コマンド一覧\n"
+            "`/backup` — サーバー構成をバックアップ\n"
+            "`/restore` — バックアップから復元"
+        ),
+        inline=False
+    )
+    await interaction.followup.send(embed=embed2)
 
 
 # ===========================
