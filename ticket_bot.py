@@ -731,18 +731,29 @@ class WarnSeverity(discord.ui.View):
 
         # 10回でBAN
         if count >= 10:
+            # まず警告embedを全員に表示
+            warn_embed = discord.Embed(
+                title=f"{rank_emoji} 警告発行（{rank_label}）",
+                color=rank_color,
+                timestamp=now
+            )
+            warn_embed.add_field(name="対象", value=member.mention, inline=True)
+            warn_embed.add_field(name="累計警告", value=f"**{count}回**", inline=True)
+            warn_embed.add_field(name="加算", value=f"+{total_add}回", inline=True)
+            warn_embed.add_field(name="理由", value=reason, inline=False)
+            warn_embed.set_footer(text="累計警告が10回に達したためBANを実行しました。")
+            await interaction.response.edit_message(content="✅ 処理完了", embed=None, view=None)
+            await interaction.followup.send(embed=warn_embed)
+            await interaction.followup.send(content=f"🔨 {member.mention} の警告が **{count}回** に達したためBANしました。")
+            # BAN実行
             try:
-                await member.send(f"🔨 **{guild.name}** での警告が **{count}回** に達したためBANされました。")
+                await member.send(f"🔨 **{guild.name}** にて警告が **{count}回** に達したためBANされました。")
             except Exception:
                 pass
             try:
                 await member.ban(reason=f"警告が{count}回に達したためBAN")
             except Exception:
                 pass
-            await interaction.response.edit_message(content="✅ 処理完了", embed=None, view=None)
-            await interaction.followup.send(
-                content=f"🔨 {member.mention} の警告が **{count}回** に達したためBANしました。"
-            )
             await log_action(guild, "🔨 BAN（警告上限）", member, f"警告{count}回 | 実行者: {interaction.user}")
             self.stop()
             return
@@ -764,7 +775,7 @@ class WarnSeverity(discord.ui.View):
         await interaction.response.edit_message(content="✅ 警告を発行しました。", embed=None, view=None)
         await interaction.followup.send(embed=embed)
 
-        # DMに通知
+        # DMに通知（全員に送る）
         dm_footer = {
             "light": "2週間ルールを守ってご利用いただければ、自動的に解除されます。\nなお、新たに警告を受けた場合はタイマーがリセットされますのでご注意ください。",
             "caution": "1ヶ月間ルールを守ってご利用いただければ、自動的に解除されます。\nなお、新たに警告を受けた場合はタイマーがリセットされますのでご注意ください。",
