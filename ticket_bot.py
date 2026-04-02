@@ -581,7 +581,7 @@ class WarnSeverity(discord.ui.View):
                 await member.ban(reason=f"警告が{count}回に達したためBAN")
             except Exception:
                 pass
-            await interaction.response.edit_message(
+            await interaction.message.edit(
                 content=f"🔨 {member.mention} の警告が **{count}回** に達したためBANしました。",
                 embed=None, view=None
             )
@@ -603,7 +603,7 @@ class WarnSeverity(discord.ui.View):
                   "danger": "永続（自動解除なし）"}[rank]
         embed.set_footer(text=footer)
 
-        await interaction.response.edit_message(embed=embed, view=None)
+        await interaction.message.edit(embed=embed, view=None)
         await log_action(guild, f"{rank_emoji} 警告（{rank_label}）", member,
                          f"理由: {reason} | 累計{count}回(+{total_add}) | 実行者: {interaction.user}")
         self.stop()
@@ -637,7 +637,6 @@ class WarnSeverity(discord.ui.View):
 @staff_check()
 @app_commands.describe(member="警告するユーザー", reason="理由")
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "理由なし"):
-    await interaction.response.defer()
     count = await get_warns(member.id) + 1
     await set_warns(member.id, count)
 
@@ -657,7 +656,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
     embed.add_field(name="🔴 重度", value="+7 or +10回 | 要注意人物ロール付与 | 永続", inline=False)
 
     view = WarnSeverity(member, reason, count)
-    await interaction.followup.send(embed=embed, view=view)
+    await interaction.response.send_message(embed=embed, view=view)
 
 
 @bot.tree.command(name="warnlist", description="全員の警告数一覧を表示します（スタッフのみ）")
@@ -1473,12 +1472,8 @@ async def on_ready():
     bot.add_view(AuthPanelView())
     bot.add_view(TicketView())
     try:
-        guild = discord.Object(id=1471075951445278903)
-        bot.tree.copy_global_to(guild=guild)
-        guild_synced = await bot.tree.sync(guild=guild)
-        print(f"✅ ギルドコマンドを同期しました ({len(guild_synced)}個)")
         synced = await bot.tree.sync()
-        print(f"✅ グローバルコマンドを同期しました ({len(synced)}個)")
+        print(f"✅ スラッシュコマンドを同期しました ({len(synced)}個)")
     except Exception as e:
         print(f"❌ 同期エラー: {e}")
     print(f"✅ {bot.user} としてログインしました")
