@@ -186,6 +186,9 @@ ALLOWED_DOMAINS = [
 # ロール別許可ドメイン（起動時にSupabaseから読み込む）
 ROLE_ALLOWED_DOMAINS: dict = {}  # { role_id: [domain, ...] }
 
+# 警告ランクタイマー（起動時にDBから読み込む）
+warn_role_timers: dict = {}  # { user_id: { "rank": str, "expire_at": datetime|None } }
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
