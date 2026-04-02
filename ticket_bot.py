@@ -74,6 +74,18 @@ def staff_check():
         return True
     return app_commands.check(predicate)
 
+def admin_check():
+    """管理者ロール（ADMIN_ROLE_ID）または administrator権限のみ許可"""
+    async def predicate(interaction: discord.Interaction) -> bool:
+        member = interaction.user
+        if member.guild_permissions.administrator:
+            return True
+        if any(r.id == ADMIN_ROLE_ID for r in member.roles):
+            return True
+        await interaction.response.send_message("❌ このコマンドは管理者のみ使用できます。", ephemeral=True)
+        return False
+    return app_commands.check(predicate)
+
 # ===== 警告データ（Supabase） =====
 async def get_warns(user_id: int) -> int:
     rows = await sb_get("warns", f"user_id=eq.{user_id}")
@@ -1107,7 +1119,7 @@ async def exempt_role_list(interaction: discord.Interaction):
 # ===========================
 
 @bot.tree.command(name="setup", description="ボットの設定を一括で行います（管理者のみ）")
-@staff_check()
+@admin_check()
 @app_commands.describe(
     auth_category="認証チケット用カテゴリ",
     ticket_log="チケットログチャンネル",
@@ -1358,7 +1370,7 @@ async def send_inquiry_panel(interaction: discord.Interaction, category: discord
 
 
 @bot.tree.command(name="botstatus", description="Botの現在の設定を表示します（スタッフのみ）")
-@staff_check()
+@admin_check()
 async def botstatus(interaction: discord.Interaction):
     await interaction.response.defer()
     guild = interaction.guild
@@ -1511,7 +1523,7 @@ async def botstatus(interaction: discord.Interaction):
 # ===========================
 
 @bot.tree.command(name="backup", description="サーバーのチャンネル構成とロールをバックアップします（管理者のみ）")
-@staff_check()
+@admin_check()
 async def backup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
@@ -1539,7 +1551,7 @@ async def backup(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="restore", description="バックアップからチャンネル構成とロールを復元します（管理者のみ）")
-@staff_check()
+@admin_check()
 @app_commands.describe(file="backupコマンドで生成したJSONファイル")
 async def restore(interaction: discord.Interaction, file: discord.Attachment):
     await interaction.response.defer(ephemeral=True)
