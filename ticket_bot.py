@@ -177,6 +177,41 @@ async def add_role_allowed_domain(role_id: int, domain: str):
 async def remove_role_allowed_domain(role_id: int, domain: str):
     await sb_delete("role_allowed_domains", f"role_id=eq.{role_id}&domain=eq.{domain}")
 
+# ===== 警告ランクロール設定（Supabase config） =====
+async def get_warn_role_id(rank: str):
+    """rank: 'caution' or 'danger'"""
+    return await get_config(f"warn_role_{rank}")
+
+async def set_warn_role_id(rank: str, role_id: int):
+    await set_config(f"warn_role_{rank}", role_id)
+
+# ===== 警告ランク自動解除 Supabase CRUD =====
+# テーブル: warn_roles { user_id bigint PK, rank text, expire_at timestamptz nullable }
+async def db_set_warn_timer(user_id: int, rank: str, expire_at):
+    """expire_at: datetime(UTC) or None（永続）"""
+    expire_str = expire_at.isoformat() if expire_at else None
+    await sb_upsert("warn_roles", {"user_id": user_id, "rank": rank, "expire_at": expire_str})
+
+async def db_remove_warn_timer(user_id: int):
+    await sb_delete("warn_roles", f"user_id=eq.{user_id}")
+
+async def db_load_warn_timers() -> dict:
+    """起動時にDBから全タイマーを読み込む"""
+    rows = await sb_get("warn_roles", "select=user_id,rank,expire_at")
+    result = {}
+    if rows:
+        for r in rows:
+            expire_at = None
+            if r.get("expire_at"):
+                try:
+                    expire_at = datetime.fromisoformat(r["expire_at"].replace("Z", "+00:00"))
+                    if expire_at.tzinfo is None:
+                        expire_at = expire_at.replace(tzinfo=timezone.utc)
+                except Exception:
+                    expire_at = None
+            result[r["user_id"]] = {"rank": r["rank"], "expire_at": expire_at}
+    return result
+
 # ===== 許可するURLドメイン =====
 ALLOWED_DOMAINS = [
     "youtube.com",
@@ -1459,11 +1494,12 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 @bot.event
 async def on_ready():
-    global BAD_WORDS, SPAM_IGNORE_IDS, EXEMPT_ROLE_IDS, ROLE_ALLOWED_DOMAINS
+    global BAD_WORDS, SPAM_IGNORE_IDS, EXEMPT_ROLE_IDS, ROLE_ALLOWED_DOMAINS, warn_role_timers
     BAD_WORDS = await load_bad_words_db()
     SPAM_IGNORE_IDS = set(await get_spam_ignore_ids())
     EXEMPT_ROLE_IDS = set(await get_exempt_role_ids())
     ROLE_ALLOWED_DOMAINS = await get_role_allowed_domains()
+    warn_role_timers.update(await db_load_warn_timers())
     check_auth_tickets.start()
     check_warn_role_expire.start()
     auto_backup.start()
