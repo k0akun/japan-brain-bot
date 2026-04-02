@@ -86,6 +86,55 @@ def admin_check():
         return False
     return app_commands.check(predicate)
 
+# ===========================
+# ===== ページネーション =====
+# ===========================
+
+class PageView(discord.ui.View):
+    """汎用ページネーションView"""
+    def __init__(self, pages: list, title: str, color: discord.Color, ephemeral: bool = True):
+        super().__init__(timeout=120)
+        self.pages = pages      # [ "line1\nline2\n..." ] のリスト
+        self.title = title
+        self.color = color
+        self.ephemeral = ephemeral
+        self.current = 0
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.prev_button.disabled = self.current == 0
+        self.next_button.disabled = self.current >= len(self.pages) - 1
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=self.title,
+            description=self.pages[self.current],
+            color=self.color,
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_footer(text=f"ページ {self.current + 1} / {len(self.pages)}")
+        return embed
+
+    @discord.ui.button(label="◀ 前へ", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current -= 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="次へ ▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current += 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+
+def paginate(lines: list, per_page: int = 20) -> list:
+    """行リストをper_page行ずつのページに分割"""
+    pages = []
+    for i in range(0, len(lines), per_page):
+        pages.append("\n".join(lines[i:i+per_page]))
+    return pages
+
 # ===== 警告データ（Supabase） =====
 async def get_warns(user_id: int) -> int:
     rows = await sb_get("warns", f"user_id=eq.{user_id}")
@@ -740,7 +789,6 @@ async def warnlist(interaction: discord.Interaction):
     if not rows:
         await interaction.followup.send("📋 警告のあるユーザーはいません。", ephemeral=True)
         return
-    embed = discord.Embed(title="⚠️ 警告数一覧", color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
     lines = []
     for row in rows:
         user_id = row["user_id"]
@@ -748,11 +796,9 @@ async def warnlist(interaction: discord.Interaction):
         member = interaction.guild.get_member(int(user_id))
         name = member.mention if member else f"ID: {user_id}（退出済み）"
         lines.append(f"{name} → **{count}回**")
-    chunk = "\n".join(lines[:25])
-    embed.description = chunk
-    if len(lines) > 25:
-        embed.set_footer(text=f"他 {len(lines) - 25} 人")
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    pages = paginate(lines, 20)
+    view = PageView(pages, f"⚠️ 警告数一覧（全{len(lines)}人）", discord.Color.orange())
+    await interaction.followup.send(embed=view.build_embed(), view=view, ephemeral=True)
 
 
 @bot.tree.command(name="warns", description="ユーザーの警告数を確認します")
@@ -843,16 +889,13 @@ async def banlist(interaction: discord.Interaction):
     if not bans:
         await interaction.followup.send("📋 BANされているユーザーはいません。", ephemeral=True)
         return
-    embed = discord.Embed(title="🔨 BAN一覧", color=discord.Color.red(), timestamp=datetime.now(timezone.utc))
-    embed.set_footer(text=f"合計: {len(bans)} 人")
     lines = []
-    for entry in bans[:25]:
+    for entry in bans:
         reason = entry.reason or "理由なし"
         lines.append(f"**{entry.user}** (`{entry.user.id}`) - {reason}")
-    embed.description = "\n".join(lines)
-    if len(bans) > 25:
-        embed.add_field(name="⚠️", value=f"他 {len(bans) - 25} 人（最初の25人を表示）", inline=False)
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    pages = paginate(lines, 15)
+    view = PageView(pages, f"🔨 BAN一覧（全{len(lines)}人）", discord.Color.red())
+    await interaction.followup.send(embed=view.build_embed(), view=view, ephemeral=True)
 
 
 @bot.tree.command(name="timeout", description="ユーザーをタイムアウトします（スタッフのみ）")
@@ -1011,9 +1054,10 @@ async def badword_list(interaction: discord.Interaction):
     if not BAD_WORDS:
         await interaction.followup.send("📋 禁止ワードは登録されていません。", ephemeral=True)
         return
-    word_list = "\n".join([f"・{w}" for w in BAD_WORDS])
-    embed = discord.Embed(title="🚫 禁止ワード一覧", description=word_list, color=discord.Color.red())
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    lines = [f"・{w}" for w in BAD_WORDS]
+    pages = paginate(lines, 20)
+    view = PageView(pages, f"🚫 禁止ワード一覧（全{len(lines)}件）", discord.Color.red())
+    await interaction.followup.send(embed=view.build_embed(), view=view, ephemeral=True)
 
 
 # ===========================
@@ -1061,8 +1105,9 @@ async def spam_ignore_list(interaction: discord.Interaction):
     for cid in SPAM_IGNORE_IDS:
         ch = interaction.guild.get_channel(cid)
         lines.append(f"・{ch.mention} (`{cid}`)" if ch else f"・不明なチャンネル (`{cid}`)")
-    embed = discord.Embed(title="📋 長文スパム検知 除外リスト", description="\n".join(lines), color=discord.Color.blurple())
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    pages = paginate(lines, 20)
+    view = PageView(pages, f"📋 長文スパム除外リスト（全{len(lines)}件）", discord.Color.blurple())
+    await interaction.followup.send(embed=view.build_embed(), view=view, ephemeral=True)
 
 
 # ===========================
@@ -1110,8 +1155,9 @@ async def exempt_role_list(interaction: discord.Interaction):
     for rid in EXEMPT_ROLE_IDS:
         role = interaction.guild.get_role(rid)
         lines.append(f"・{role.mention} (`{rid}`)" if role else f"・不明なロール (`{rid}`)")
-    embed = discord.Embed(title="🛡️ AutoMod除外ロール一覧", description="\n".join(lines), color=discord.Color.blurple())
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    pages = paginate(lines, 20)
+    view = PageView(pages, f"🛡️ AutoMod除外ロール一覧（全{len(lines)}件）", discord.Color.blurple())
+    await interaction.followup.send(embed=view.build_embed(), view=view, ephemeral=True)
 
 
 # ===========================
