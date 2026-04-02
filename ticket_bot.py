@@ -1508,6 +1508,12 @@ async def on_ready():
     bot.add_view(AuthPanelView())
     bot.add_view(TicketView())
     try:
+        # ギルド固有コマンドをクリア（重複解消のため一度だけ実行）
+        guild_obj = discord.Object(id=1471075951445278903)
+        bot.tree.clear_commands(guild=guild_obj)
+        await bot.tree.sync(guild=guild_obj)
+        print("✅ ギルドコマンドをクリアしました")
+        # グローバル同期
         synced = await bot.tree.sync()
         print(f"✅ スラッシュコマンドを同期しました ({len(synced)}個)")
     except Exception as e:
