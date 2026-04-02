@@ -1307,8 +1307,12 @@ async def on_ready():
     bot.add_view(AuthPanelView())
     bot.add_view(TicketView())
     try:
+        guild = discord.Object(id=1471075951445278903)
+        bot.tree.copy_global_to(guild=guild)
+        guild_synced = await bot.tree.sync(guild=guild)
+        print(f"✅ ギルドコマンドを同期しました ({len(guild_synced)}個)")
         synced = await bot.tree.sync()
-        print(f"✅ スラッシュコマンドを同期しました ({len(synced)}個)")
+        print(f"✅ グローバルコマンドを同期しました ({len(synced)}個)")
     except Exception as e:
         print(f"❌ 同期エラー: {e}")
     print(f"✅ {bot.user} としてログインしました")
