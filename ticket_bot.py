@@ -482,11 +482,42 @@ async def on_message(message: discord.Message):
             await message.delete()
             count = await get_warns(message.author.id) + 1
             await set_warns(message.author.id, count)
+
+            # 軽度ランク（+1）を自動適用
+            from datetime import timedelta as _td
+            _now = datetime.now(timezone.utc)
+            _old = warn_role_timers.pop(message.author.id, None)
+            if _old:
+                _old_role_id = await get_warn_role_id(_old["rank"])
+                if _old_role_id:
+                    _old_role = message.guild.get_role(_old_role_id)
+                    if _old_role and _old_role in message.author.roles:
+                        try:
+                            await message.author.remove_roles(_old_role, reason="警告ランク更新")
+                        except Exception:
+                            pass
+                await db_remove_warn_timer(message.author.id)
+            _expire_at = _now + _td(days=14)
+            warn_role_timers[message.author.id] = {"rank": "light", "expire_at": _expire_at}
+            await db_set_warn_timer(message.author.id, "light", _expire_at)
+
+            # チャンネルに一瞬表示
             await message.channel.send(
-                f"⚠️ {message.author.mention} 禁止ワードが含まれています。(警告 {count}回目)",
+                f"⚠️ {message.author.mention} 禁止ワードが含まれています。(警告 {count}回目 / 軽度)",
                 delete_after=5
             )
-            await log_action(message.guild, "🚫 禁止ワード検知", message.author, f"内容: ||{text}|| | 警告{count}回目{'（転送）' if forwarded else ''}")
+            # DMに通知
+            try:
+                await message.author.send(
+                    f"⚠️ **{message.guild.name}** にて禁止ワードを使用されたため、警告（軽度）が付与されました。\n"
+                    f"累計警告数: **{count}回**\n\n"
+                    f"2週間ルールを守ってご利用いただければ、自動的に解除されます。\n"
+                    f"なお、新たに警告を受けた場合はタイマーがリセットされますのでご注意ください。"
+                )
+            except Exception:
+                pass
+
+            await log_action(message.guild, "🚫 禁止ワード検知（軽度）", message.author, f"内容: ||{text}|| | 警告{count}回目{'（転送）' if forwarded else ''}")
             await auto_punish(message.author, message.guild, count)
             return
 
@@ -732,6 +763,23 @@ class WarnSeverity(discord.ui.View):
 
         await interaction.response.edit_message(content="✅ 警告を発行しました。", embed=None, view=None)
         await interaction.followup.send(embed=embed)
+
+        # DMに通知
+        dm_footer = {
+            "light": "2週間ルールを守ってご利用いただければ、自動的に解除されます。\nなお、新たに警告を受けた場合はタイマーがリセットされますのでご注意ください。",
+            "caution": "1ヶ月間ルールを守ってご利用いただければ、自動的に解除されます。\nなお、新たに警告を受けた場合はタイマーがリセットされますのでご注意ください。",
+            "danger": "本警告は永続となります。今後のご利用にはくれぐれもご注意ください。"
+        }[rank]
+        try:
+            await member.send(
+                f"{rank_emoji} **{guild.name}** にて警告（{rank_label}）が付与されました。\n"
+                f"累計警告数: **{count}回**\n"
+                f"理由: {reason}\n\n"
+                f"{dm_footer}"
+            )
+        except Exception:
+            pass
+
         await log_action(guild, f"{rank_emoji} 警告（{rank_label}）", member,
                          f"理由: {reason} | 累計{count}回(+{total_add}) | 実行者: {interaction.user}")
         self.stop()
