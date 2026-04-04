@@ -565,6 +565,22 @@ async def auto_punish(member: discord.Member, guild: discord.Guild, count: int):
 
 
 # ===========================
+# ===== メッセージ編集検知 =====
+# ===========================
+
+@bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    """編集後のメッセージにもAutoModを適用する"""
+    if after.author.bot:
+        return
+    # 内容が変わっていない場合はスキップ
+    if before.content == after.content:
+        return
+    # on_messageと同じ処理を走らせる
+    await on_message(after)
+
+
+# ===========================
 # ===== レイド検知 =====
 # ===========================
 
