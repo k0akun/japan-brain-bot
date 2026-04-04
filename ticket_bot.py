@@ -246,19 +246,35 @@ async def get_warn_role_id(rank: str):
 async def set_warn_role_id(rank: str, role_id: int):
     await set_config(f"warn_role_{rank}", role_id)
 
-# ===== 警告ランク自動解除 Supabase CRUD =====
-# テーブル: warn_roles { user_id bigint PK, rank text, expire_at timestamptz nullable }
-async def db_set_warn_timer(user_id: int, rank: str, expire_at):
-    """expire_at: datetime(UTC) or None（永続）"""
+# ===== 警告ログ Supabase CRUD =====
+# テーブル: warn_logs { id, user_id, rank, points, expire_at, created_at }
+
+async def db_add_warn_log(user_id: int, rank: str, points: int, expire_at) -> int:
+    """警告ログを1件追加してIDを返す"""
     expire_str = expire_at.isoformat() if expire_at else None
-    await sb_upsert("warn_roles", {"user_id": user_id, "rank": rank, "expire_at": expire_str})
+    rows = await sb_upsert("warn_logs", {
+        "user_id": user_id,
+        "rank": rank,
+        "points": points,
+        "expire_at": expire_str
+    })
+    if rows and len(rows) > 0:
+        return rows[0].get("id")
+    return None
 
-async def db_remove_warn_timer(user_id: int):
-    await sb_delete("warn_roles", f"user_id=eq.{user_id}")
+async def db_remove_warn_log(log_id: int):
+    """警告ログを1件削除"""
+    await sb_delete("warn_logs", f"id=eq.{log_id}")
 
-async def db_load_warn_timers() -> dict:
-    """起動時にDBから全タイマーを読み込む"""
-    rows = await sb_get("warn_roles", "select=user_id,rank,expire_at")
+async def db_remove_all_warn_logs(user_id: int):
+    """ユーザーの全警告ログを削除"""
+    await sb_delete("warn_logs", f"user_id=eq.{user_id}")
+
+async def db_load_warn_logs() -> dict:
+    """起動時にDBから全ログを読み込む
+    返り値: { user_id: [ {id, rank, points, expire_at}, ... ] }
+    """
+    rows = await sb_get("warn_logs", "select=id,user_id,rank,points,expire_at&order=created_at.asc")
     result = {}
     if rows:
         for r in rows:
@@ -270,8 +286,44 @@ async def db_load_warn_timers() -> dict:
                         expire_at = expire_at.replace(tzinfo=timezone.utc)
                 except Exception:
                     expire_at = None
-            result[r["user_id"]] = {"rank": r["rank"], "expire_at": expire_at}
+            uid = r["user_id"]
+            if uid not in result:
+                result[uid] = []
+            result[uid].append({
+                "id": r["id"],
+                "rank": r["rank"],
+                "points": r["points"],
+                "expire_at": expire_at
+            })
     return result
+
+# warn_logsのメモリキャッシュ
+# { user_id: [ {id, rank, points, expire_at}, ... ] }
+warn_logs_cache: dict = {}
+
+async def get_active_warn_points(user_id: int) -> int:
+    """有効な警告ログの合計ポイントを返す"""
+    logs = warn_logs_cache.get(user_id, [])
+    return sum(log["points"] for log in logs)
+
+async def get_current_rank(user_id: int) -> str:
+    """有効なログの中で最も重いランクを返す"""
+    logs = warn_logs_cache.get(user_id, [])
+    if not logs:
+        return "none"
+    ranks = [log["rank"] for log in logs]
+    if "danger" in ranks:
+        return "danger"
+    if "caution" in ranks:
+        return "caution"
+    return "light"
+
+# 後方互換性のためのラッパー（旧コードから呼ばれる箇所用）
+async def db_set_warn_timer(user_id: int, rank: str, expire_at):
+    pass  # warn_logsで管理するため不要
+
+async def db_remove_warn_timer(user_id: int):
+    pass  # warn_logsで管理するため不要
 
 # ===== 許可するURLドメイン =====
 ALLOWED_DOMAINS = [
@@ -282,8 +334,8 @@ ALLOWED_DOMAINS = [
 # ロール別許可ドメイン（起動時にSupabaseから読み込む）
 ROLE_ALLOWED_DOMAINS: dict = {}  # { role_id: [domain, ...] }
 
-# 警告ランクタイマー（起動時にDBから読み込む）
-warn_role_timers: dict = {}  # { user_id: { "rank": str, "expire_at": datetime|None } }
+# 警告ランクタイマーは warn_logs_cache で管理（後方互換）
+warn_role_timers: dict = {}  # 後方互換用（実際はwarn_logs_cacheを使用）
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -483,23 +535,19 @@ async def on_message(message: discord.Message):
             count = await get_warns(message.author.id) + 1
             await set_warns(message.author.id, count)
 
-            # 軽度ランク（+1）を自動適用
+            # 軽度ランク（+1）を自動適用・warn_logsに記録
             from datetime import timedelta as _td
             _now = datetime.now(timezone.utc)
-            _old = warn_role_timers.pop(message.author.id, None)
-            if _old:
-                _old_role_id = await get_warn_role_id(_old["rank"])
-                if _old_role_id:
-                    _old_role = message.guild.get_role(_old_role_id)
-                    if _old_role and _old_role in message.author.roles:
-                        try:
-                            await message.author.remove_roles(_old_role, reason="警告ランク更新")
-                        except Exception:
-                            pass
-                await db_remove_warn_timer(message.author.id)
             _expire_at = _now + _td(days=14)
-            warn_role_timers[message.author.id] = {"rank": "light", "expire_at": _expire_at}
-            await db_set_warn_timer(message.author.id, "light", _expire_at)
+            _log_id = await db_add_warn_log(message.author.id, "light", 1, _expire_at)
+            if message.author.id not in warn_logs_cache:
+                warn_logs_cache[message.author.id] = []
+            warn_logs_cache[message.author.id].append({
+                "id": _log_id,
+                "rank": "light",
+                "points": 1,
+                "expire_at": _expire_at
+            })
 
             # チャンネルに一瞬表示
             await message.channel.send(
@@ -701,40 +749,36 @@ class WarnSeverity(discord.ui.View):
         rank_color = {"light": discord.Color.yellow(), "caution": discord.Color.orange(), "danger": discord.Color.red()}[rank]
         now = datetime.now(timezone.utc)
 
-        # 既存タイマー・ロールをリセット
-        old_data = warn_role_timers.pop(member.id, None)
-        if old_data:
-            old_role_id = await get_warn_role_id(old_data["rank"])
-            if old_role_id:
-                old_role = guild.get_role(old_role_id)
-                if old_role and old_role in member.roles:
-                    try:
-                        await member.remove_roles(old_role, reason="警告ランク更新")
-                    except Exception:
-                        pass
-            await db_remove_warn_timer(member.id)
-
-        # ロール付与＆タイマー設定
+        # warn_logsに記録
         if rank == "light":
             expire_at = now + timedelta(days=14)
-            warn_role_timers[member.id] = {"rank": "light", "expire_at": expire_at}
-            await db_set_warn_timer(member.id, "light", expire_at)
-
         elif rank == "caution":
-            role_id = await get_warn_role_id("caution")
-            if role_id:
-                role = guild.get_role(role_id)
-                if role:
-                    try:
-                        await member.add_roles(role, reason=f"警告ランク: {rank_label}")
-                    except Exception:
-                        pass
             expire_at = now + timedelta(days=30)
-            warn_role_timers[member.id] = {"rank": "caution", "expire_at": expire_at}
-            await db_set_warn_timer(member.id, "caution", expire_at)
+        else:  # danger
+            expire_at = None
 
-        elif rank == "danger":
-            role_id = await get_warn_role_id("danger")
+        log_id = await db_add_warn_log(member.id, rank, total_add, expire_at)
+        if member.id not in warn_logs_cache:
+            warn_logs_cache[member.id] = []
+        warn_logs_cache[member.id].append({
+            "id": log_id,
+            "rank": rank,
+            "points": total_add,
+            "expire_at": expire_at
+        })
+
+        # 現在の最重ランクのロールを付与（全ランクロールを一旦外してから付与）
+        for rank_key in ["caution", "danger"]:
+            _rid = await get_warn_role_id(rank_key)
+            if _rid:
+                _role = guild.get_role(_rid)
+                if _role and _role in member.roles:
+                    try:
+                        await member.remove_roles(_role, reason="警告ランク更新")
+                    except Exception:
+                        pass
+        if rank in ["caution", "danger"]:
+            role_id = await get_warn_role_id(rank)
             if role_id:
                 role = guild.get_role(role_id)
                 if role:
@@ -742,8 +786,6 @@ class WarnSeverity(discord.ui.View):
                         await member.add_roles(role, reason=f"警告ランク: {rank_label}")
                     except Exception:
                         pass
-            warn_role_timers.pop(member.id, None)
-            await db_set_warn_timer(member.id, "danger", None)
 
         # 10回でBAN
         if count >= 10:
@@ -1766,12 +1808,12 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 @bot.event
 async def on_ready():
-    global BAD_WORDS, SPAM_IGNORE_IDS, EXEMPT_ROLE_IDS, ROLE_ALLOWED_DOMAINS, warn_role_timers
+    global BAD_WORDS, SPAM_IGNORE_IDS, EXEMPT_ROLE_IDS, ROLE_ALLOWED_DOMAINS, warn_role_timers, warn_logs_cache
     BAD_WORDS = await load_bad_words_db()
     SPAM_IGNORE_IDS = set(await get_spam_ignore_ids())
     EXEMPT_ROLE_IDS = set(await get_exempt_role_ids())
     ROLE_ALLOWED_DOMAINS = await get_role_allowed_domains()
-    warn_role_timers.update(await db_load_warn_timers())
+    warn_logs_cache.update(await db_load_warn_logs())
     check_auth_tickets.start()
     check_warn_role_expire.start()
     auto_backup.start()
@@ -1799,28 +1841,63 @@ async def on_ready():
 
 @tasks.loop(minutes=10)
 async def check_warn_role_expire():
-    """軽度（2週間）・中度（1ヶ月）の警告ロールを自動解除する（DB連携）"""
+    """警告ログを1件ずつ期限チェックして削除・ロール更新する"""
     now = datetime.now(timezone.utc)
-    expired = [uid for uid, data in list(warn_role_timers.items())
-               if data["expire_at"] is not None and data["expire_at"] <= now]
-    for uid in expired:
-        data = warn_role_timers.pop(uid, None)
-        if not data:
+    for uid in list(warn_logs_cache.keys()):
+        logs = warn_logs_cache.get(uid, [])
+        expired_logs = [l for l in logs if l["expire_at"] is not None and l["expire_at"] <= now]
+        if not expired_logs:
             continue
-        await db_remove_warn_timer(uid)
+        for log in expired_logs:
+            await db_remove_warn_log(log["id"])
+            warn_logs_cache[uid] = [l for l in warn_logs_cache.get(uid, []) if l["id"] != log["id"]]
+            # warns テーブルも減算
+            current = await get_warns(uid)
+            new_count = max(current - log["points"], 0)
+            await set_warns(uid, new_count)
+
+        # ロールを現在の最重ランクに更新
+        remaining = warn_logs_cache.get(uid, [])
+        new_rank = "none"
+        if remaining:
+            ranks = [l["rank"] for l in remaining]
+            if "danger" in ranks:
+                new_rank = "danger"
+            elif "caution" in ranks:
+                new_rank = "caution"
+            else:
+                new_rank = "light"
+
+        # 全ランクロールを一旦外す
         for guild in bot.guilds:
             member = guild.get_member(uid)
             if not member:
                 continue
-            role_id = await get_warn_role_id(data["rank"])
-            if role_id:
-                role = guild.get_role(role_id)
-                if role and role in member.roles:
-                    try:
-                        await member.remove_roles(role, reason="警告ランク自動解除")
-                        await log_action(guild, "✅ 警告ランクロール自動解除", member, f"ランク: {data['rank']} | 期限切れ")
-                    except Exception:
-                        pass
+            for rank_key in ["caution", "danger"]:
+                role_id = await get_warn_role_id(rank_key)
+                if role_id:
+                    role = guild.get_role(role_id)
+                    if role and role in member.roles:
+                        try:
+                            await member.remove_roles(role, reason="警告ログ期限切れ")
+                        except Exception:
+                            pass
+            # 新しいランクのロールを付与
+            if new_rank in ["caution", "danger"]:
+                role_id = await get_warn_role_id(new_rank)
+                if role_id:
+                    role = guild.get_role(role_id)
+                    if role:
+                        try:
+                            await member.add_roles(role, reason=f"警告ランク更新: {new_rank}")
+                        except Exception:
+                            pass
+            rank_label = {"light": "軽度", "caution": "中度", "danger": "重度", "none": "なし"}[new_rank]
+            expired_points = sum(l["points"] for l in expired_logs)
+            await log_action(guild, "✅ 警告ログ自動削除", member,
+                             f"削除: {len(expired_logs)}件(-{expired_points}回) | 残り: {len(remaining)}件 | 現ランク: {rank_label}")
+        if not remaining:
+            warn_logs_cache.pop(uid, None)
 
 
 @check_warn_role_expire.before_loop
