@@ -221,6 +221,20 @@ async def add_spam_ignore_id(channel_id: int):
 async def remove_spam_ignore_id(channel_id: int):
     await sb_delete("spam_ignore", f"channel_id=eq.{channel_id}")
 
+# ===== 荒らしサーバーブラックリスト（Supabase） =====
+# テーブル: blocked_servers { guild_id bigint PK }
+async def get_blocked_servers() -> list:
+    rows = await sb_get("blocked_servers", "select=guild_id")
+    if rows:
+        return [r["guild_id"] for r in rows]
+    return []
+
+async def add_blocked_server(guild_id: int):
+    await sb_upsert("blocked_servers", {"guild_id": guild_id})
+
+async def remove_blocked_server(guild_id: int):
+    await sb_delete("blocked_servers", f"guild_id=eq.{guild_id}")
+
 # ===== 特定ロール許可URLドメイン（Supabase） =====
 # テーブル: role_allowed_domains { role_id: int, domain: str }
 async def get_role_allowed_domains() -> dict:
@@ -336,6 +350,7 @@ ROLE_ALLOWED_DOMAINS: dict = {}  # { role_id: [domain, ...] }
 
 # 警告ランクタイマーは warn_logs_cache で管理（後方互換）
 warn_role_timers: dict = {}  # 後方互換用（実際はwarn_logs_cacheを使用）
+BLOCKED_SERVERS: set = set()  # 荒らしサーバーIDリスト（起動時に読み込む）
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -635,6 +650,31 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
 @bot.event
 async def on_member_join(member: discord.Member):
     now = datetime.now(timezone.utc).timestamp()
+
+    # ===== 荒らしサーバーチェック =====
+    if BLOCKED_SERVERS:
+        for blocked_guild_id in BLOCKED_SERVERS:
+            blocked_guild = bot.get_guild(blocked_guild_id)
+            if blocked_guild is None:
+                continue
+            if blocked_guild.get_member(member.id) is not None:
+                # 荒らしサーバーに参加中 → DM送信してキック
+                try:
+                    await member.send(
+                        f"⚠️ **{member.guild.name}** への参加が拒否されました。\n"
+                        f"荒らしサーバーに参加しているためキックされました。\n"
+                        f"ご不明な点がございましたらサーバー管理者までお問い合わせください。"
+                    )
+                except Exception:
+                    pass
+                try:
+                    await member.kick(reason=f"荒らしサーバー（ID:{blocked_guild_id}）に参加中")
+                    await log_action(member.guild, "🚫 荒らしサーバー検知キック", member,
+                                     f"参加中の荒らしサーバー: {blocked_guild.name} (`{blocked_guild_id}`)")
+                except Exception:
+                    pass
+                return
+
     join_tracker.append(now)
     join_tracker[:] = [t for t in join_tracker if now - t < RAID_JOIN_INTERVAL]
 
@@ -1278,6 +1318,67 @@ async def exempt_role_list(interaction: discord.Interaction):
 
 
 # ===========================
+# ===== 荒らしサーバーブラックリスト管理 =====
+# ===========================
+
+@bot.tree.command(name="blocked-server-add", description="荒らしサーバーをブラックリストに追加します（管理者のみ）")
+@admin_check()
+@app_commands.describe(guild_id="ブロックするサーバーのID")
+async def blocked_server_add(interaction: discord.Interaction, guild_id: str):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        gid = int(guild_id)
+    except ValueError:
+        await interaction.followup.send("❌ 正しいサーバーIDを入力してください。", ephemeral=True)
+        return
+    if gid in BLOCKED_SERVERS:
+        await interaction.followup.send(f"⚠️ `{gid}` はすでに登録されています。", ephemeral=True)
+        return
+    await add_blocked_server(gid)
+    BLOCKED_SERVERS.add(gid)
+    guild_obj = bot.get_guild(gid)
+    name = guild_obj.name if guild_obj else "（Botが未参加のサーバー）"
+    await interaction.followup.send(f"✅ `{name}` (`{gid}`) をブラックリストに追加しました。", ephemeral=True)
+    await log_action(interaction.guild, "🚫 荒らしサーバー追加", interaction.user, f"サーバーID: `{gid}` | {name}")
+
+
+@bot.tree.command(name="blocked-server-remove", description="荒らしサーバーをブラックリストから削除します（管理者のみ）")
+@admin_check()
+@app_commands.describe(guild_id="削除するサーバーのID")
+async def blocked_server_remove(interaction: discord.Interaction, guild_id: str):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        gid = int(guild_id)
+    except ValueError:
+        await interaction.followup.send("❌ 正しいサーバーIDを入力してください。", ephemeral=True)
+        return
+    if gid not in BLOCKED_SERVERS:
+        await interaction.followup.send(f"❌ `{gid}` は登録されていません。", ephemeral=True)
+        return
+    await remove_blocked_server(gid)
+    BLOCKED_SERVERS.discard(gid)
+    await interaction.followup.send(f"✅ `{gid}` をブラックリストから削除しました。", ephemeral=True)
+    await log_action(interaction.guild, "🗑️ 荒らしサーバー削除", interaction.user, f"サーバーID: `{gid}`")
+
+
+@bot.tree.command(name="blocked-server-list", description="荒らしサーバーのブラックリストを表示します（管理者のみ）")
+@admin_check()
+async def blocked_server_list(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not BLOCKED_SERVERS:
+        await interaction.followup.send("📋 ブラックリストにサーバーはありません。", ephemeral=True)
+        return
+    lines = []
+    for gid in BLOCKED_SERVERS:
+        guild_obj = bot.get_guild(gid)
+        name = guild_obj.name if guild_obj else "（未参加）"
+        lines.append(f"・{name} (`{gid}`)")
+    pages = paginate(lines, 20)
+    view = PageView(pages, f"🚫 荒らしサーバーブラックリスト（{len(lines)}件）", discord.Color.red())
+    await interaction.followup.send(embed=view.build_embed(), view=view, ephemeral=True)
+
+
+# ===========================
 # ===== セットアップコマンド =====
 # ===========================
 
@@ -1808,12 +1909,13 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 @bot.event
 async def on_ready():
-    global BAD_WORDS, SPAM_IGNORE_IDS, EXEMPT_ROLE_IDS, ROLE_ALLOWED_DOMAINS, warn_role_timers, warn_logs_cache
+    global BAD_WORDS, SPAM_IGNORE_IDS, EXEMPT_ROLE_IDS, ROLE_ALLOWED_DOMAINS, warn_role_timers, warn_logs_cache, BLOCKED_SERVERS
     BAD_WORDS = await load_bad_words_db()
     SPAM_IGNORE_IDS = set(await get_spam_ignore_ids())
     EXEMPT_ROLE_IDS = set(await get_exempt_role_ids())
     ROLE_ALLOWED_DOMAINS = await get_role_allowed_domains()
     warn_logs_cache.update(await db_load_warn_logs())
+    BLOCKED_SERVERS.update(await get_blocked_servers())
     check_auth_tickets.start()
     check_warn_role_expire.start()
     auto_backup.start()
