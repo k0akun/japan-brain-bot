@@ -225,7 +225,7 @@ async def remove_spam_ignore_id(channel_id: int):
 # テーブル: blocked_servers { guild_id bigint PK }
 async def get_blocked_servers() -> list:
     rows = await sb_get("blocked_servers", "select=guild_id")
-    if rows:
+    if rows and isinstance(rows, list) and len(rows) > 0 and isinstance(rows[0], dict):
         return [r["guild_id"] for r in rows]
     return []
 
@@ -422,6 +422,11 @@ def is_forwarded(message: discord.Message) -> bool:
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
+        return
+
+    # DMメッセージはスキップ
+    if not message.guild:
+        await bot.process_commands(message)
         return
 
     if message.author.guild_permissions.administrator:
@@ -840,9 +845,16 @@ class WarnSeverity(discord.ui.View):
             warn_embed.add_field(name="加算", value=f"+{total_add}回", inline=True)
             warn_embed.add_field(name="理由", value=reason, inline=False)
             warn_embed.set_footer(text="累計警告が10回に達したためBANを実行しました。")
-            await interaction.response.edit_message(content="✅ 処理完了", embed=None, view=None)
-            await interaction.followup.send(embed=warn_embed)
-            await interaction.followup.send(content=f"🔨 {member.mention} の警告が **{count}回** に達したためBANしました。")
+            try:
+                await interaction.response.edit_message(content="✅ 処理完了", embed=None, view=None)
+            except Exception:
+                pass
+            try:
+                await interaction.followup.send(embed=warn_embed)
+                await interaction.followup.send(content=f"🔨 {member.mention} の警告が **{count}回** に達したためBANしました。")
+            except Exception:
+                await interaction.channel.send(embed=warn_embed)
+                await interaction.channel.send(content=f"🔨 {member.mention} の警告が **{count}回** に達したためBANしました。")
             # BAN実行
             try:
                 await member.send(f"🔨 **{guild.name}** にて警告が **{count}回** に達したためBANされました。")
@@ -870,8 +882,14 @@ class WarnSeverity(discord.ui.View):
                   "danger": "永続（自動解除なし）"}[rank]
         embed.set_footer(text=footer)
 
-        await interaction.response.edit_message(content="✅ 警告を発行しました。", embed=None, view=None)
-        await interaction.followup.send(embed=embed)
+        try:
+            await interaction.response.edit_message(content="✅ 警告を発行しました。", embed=None, view=None)
+        except Exception:
+            pass
+        try:
+            await interaction.followup.send(embed=embed)
+        except Exception:
+            await interaction.channel.send(embed=embed)
 
         # DMに通知（全員に送る）
         dm_footer = {
